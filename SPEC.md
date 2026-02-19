@@ -1,217 +1,316 @@
-# GameServer - Specification v0.2
+# GameServer - Specification v0.3
 
 ## Overview
 
-GameServer is a multiplayer game backend that uses LiveKit as the sole communication layer. All real-time traffic flows through LiveKit DataChannels - no WebSocket, no custom protocols. The server acts as an authoritative participant in LiveKit rooms when needed.
+GameServer is a multiplayer game backend with a **hybrid networking approach**:
+- **Game state over UDP/QUIC** - Low latency, purpose-built for games
+- **Voice/video over LiveKit** - Battle-tested WebRTC infrastructure
+- **HTTP for auth/matchmaking** - Simple, reliable
+
+This architecture uses each transport for what it does best.
 
 ## Philosophy
 
-- **LiveKit-only** - All game traffic over DataChannels
-- **UDP by default** - Low latency, configurable reliability
-- **Server as participant** - Authority when needed, observer otherwise
-- **Minimal API surface** - HTTP only for auth and persistence
+- **Right tool for the job** - UDP for game state, WebRTC for media, HTTP for APIs
+- **Pluggable transport** - Abstract networking layer for flexibility
+- **Server authority** - Authoritative game simulation with client prediction
+- **Minimal complexity** - Start simple, optimize when needed
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        HTTP API                              │
-│   (auth, tokens, matchmaking, leaderboards, stats)          │
+│   (auth, matchmaking, leaderboards, stats)                  │
 └────────────────────────────┬────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────┐
-│                    LiveKit Cloud                             │
-│   (signaling, TURN/STUN, SFU, rooms, recording)             │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-         ┌───────────────────┼───────────────────┐
-         │                   │                   │
-    ┌────▼────┐        ┌─────▼─────┐       ┌─────▼─────┐
-    │ Player  │◄──────►│  Game     │◄──────►│  Player   │
-    │    A    │   DC   │  Server   │  DC   │     B     │
-    └─────────┘        │ (Authority)│      └───────────┘
-                       └───────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   PostgreSQL    │
-                    │   Redis Cache   │
-                    └─────────────────┘
+│                    Game Server                               │
+│   ┌─────────────────┐    ┌─────────────────┐                │
+│   │  UDP/QUIC       │    │  LiveKit        │                │
+│   │  Game State     │    │  Voice/Video    │                │
+│   │  (Authoritative)│    │  (Relay)        │                │
+│   └────────┬────────┘    └────────┬────────┘                │
+│            │                      │                          │
+│   ┌────────▼──────────────────────▼────────┐                │
+│   │           Game Engine                   │                │
+│   │   (State machine, validation, physics)  │                │
+│   └────────────────────┬───────────────────┘                │
+└─────────────────────────┼───────────────────────────────────┘
+                          │
+                 ┌────────▼────────┐
+                 │   PostgreSQL    │
+                 │   Redis Cache   │
+                 └─────────────────┘
+
+Client Connection:
+┌─────────────┐         ┌─────────────┐
+│   Player    │◄─UDP───►│ Game Server │ (game state, ~16ms)
+│             │         │             │
+│             │◄─WebRTC─►│  LiveKit    │ (voice/video)
+└─────────────┘         └─────────────┘
 ```
 
 ## Repository Structure
 
 ```
 gameserver/
-├── cmd/                    # Entry points
-│   ├── api/                # HTTP API server
-│   └── authority/          # LiveKit participant (game authority)
+├── cmd/
+│   ├── server/             # Main server (HTTP + UDP)
+│   └── authority/          # Game authority service
 ├── internal/
-│   ├── livekit/            # LiveKit integration
-│   │   ├── client.go       # LiveKit SDK client
-│   │   ├── room.go         # Room management
-│   │   ├── participant.go  # Server participant
-│   │   └── egress/         # Recording/webhooks
-│   ├── game/               # Game engine core (Rust FFI or Go)
-│   │   ├── state.go        # Game state machine
-│   │   ├── authority.go    # Authoritative simulation
-│   │   ├── validation.go   # Input validation, anti-cheat
-│   │   └── rollback.go     # Rollback netcode support
-│   ├── protocols/          # Protocol handlers
-│   │   ├── game.go         # Game state/input
-│   │   ├── chat.go         # Chat messages
-│   │   └── match.go        # Match events
-│   ├── matchmaker/         # Matchmaking queue
-│   ├── leaderboard/        # Leaderboard service
-│   └── auth/               # Authentication
-├── api/                    # HTTP handlers
-│   ├── auth.go
-│   ├── match.go
-│   ├── stats.go
-│   └── tokens.go
-├── db/                     # Database
-│   ├── migrations/
-│   └── queries/
-├── config/
+│   ├── transport/          # Network abstraction
+│   │   ├── transport.go    # Interface definition
+│   │   ├── udp.go          # UDP implementation
+│   │   ├── quic.go         # QUIC implementation (optional)
+│   │   └── mock.go         # For testing
+│   ├── game/
+│   │   ├── engine.go       # Game engine core
+│   │   ├── state.go        # State machine
+│   │   ├── prediction.go   # Client prediction support
+│   │   └── validation.go   # Input validation, anti-cheat
+│   ├── livekit/            # LiveKit integration (voice/video only)
+│   │   ├── client.go       # SDK client
+│   │   └── tokens.go       # Token generation
+│   ├── matchmaker/
+│   │   └── queue.go        # Matchmaking queue
+│   └── auth/
+│       └── auth.go         # Authentication
+├── api/
+│   └── handlers/           # HTTP handlers
+├── proto/
+│   └── game.proto          # Protocol definitions
+├── db/
+│   └── migrations/
 └── docker/
 ```
 
 ## Core Components
 
-### 1. HTTP API Server
+### 1. Transport Abstraction
 
-Minimal HTTP surface for non-real-time operations:
-
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /auth/login` | Player authentication |
-| `POST /auth/register` | New player registration |
-| `GET /auth/token` | Get LiveKit access token |
-| `POST /match/queue` | Join matchmaking queue |
-| `GET /match/status` | Check queue status |
-| `GET /stats/{game}/{player}` | Player statistics |
-| `GET /leaderboard/{game}` | Game leaderboard |
-
-### 2. LiveKit Authority Service
-
-The server joins LiveKit rooms as a participant with special privileges:
+**Interface-based design** - swap implementations without touching game logic:
 
 ```go
-// Server joins room as authority
-func (a *Authority) JoinRoom(roomName, gameID string) error {
-    // Connect as participant with admin permissions
-    participant, err := a.lk.Join(roomName, WithAdminToken())
-    if err != nil {
-        return err
-    }
+// internal/transport/transport.go
+package transport
+
+type Transport interface {
+    // Connection management
+    Listen(addr string) error
+    Close() error
     
-    // Subscribe to all DataChannels
-    participant.OnDataPacket(a.handleGamePacket)
+    // Message I/O
+    SendUnreliable(addr string, data []byte) error
+    SendReliable(addr string, data []byte) error
+    OnMessage(handler func(addr string, data []byte, reliable bool))
     
-    // Run game simulation loop
-    go a.gameLoop(roomName, gameID)
-    
-    return nil
+    // Connection state
+    OnConnect(handler func(addr string))
+    OnDisconnect(handler func(addr string))
+}
+
+// Config for different transport implementations
+type Config struct {
+    MaxMessageSize    int
+    SendBufferSize    int
+    RecvBufferSize    int
 }
 ```
 
-### 3. Game State Engine
-
-Authoritative game simulation:
-
 ```go
-type GameEngine struct {
-    tickRate    int           // e.g., 60 ticks/sec
-    state       *GameState
-    inputs      map[string][]PlayerInput
-    validator   *InputValidator
+// internal/transport/udp.go
+package transport
+
+type UDPTransport struct {
+    conn    *net.UDPConn
+    handlers *HandlerRegistry
 }
 
-func (e *GameEngine) Run() {
+func (t *UDPTransport) SendUnreliable(addr string, data []byte) error {
+    // Pure UDP - fast, unreliable
+    udpAddr, _ := net.ResolveUDPAddr("udp", addr)
+    _, err := t.conn.WriteToUDP(data, udpAddr)
+    return err
+}
+
+func (t *UDPTransport) SendReliable(addr string, data []byte) error {
+    // UDP with ack/retry for important messages
+    return t.sendWithAck(addr, data, 3, 100*time.Millisecond)
+}
+```
+
+### 2. Game Engine
+
+```go
+// internal/game/engine.go
+package game
+
+type Engine struct {
+    tickRate    int           // 60 ticks/sec
+    state       *GameState
+    transport   transport.Transport
+    validator   *InputValidator
+    predictor   *PredictionEngine
+}
+
+func (e *Engine) Run() {
     ticker := time.NewTicker(time.Second / time.Duration(e.tickRate))
-    for range ticker.C {
-        e.processInputs()
-        e.simulate()
-        e.broadcastState()
+    
+    for {
+        select {
+        case <-ticker.C:
+            e.processInputs()
+            e.simulate()
+            e.broadcastState()
+        case msg := <-e.transport.Messages():
+            e.handleMessage(msg)
+        }
     }
 }
 
-func (e *GameEngine) processInputs() {
-    // Validate all inputs
-    for playerID, inputs := range e.inputs {
+func (e *Engine) processInputs() {
+    for playerID, inputs := range e.pendingInputs {
         for _, input := range inputs {
-            if e.validator.Validate(input) {
+            if e.validator.Validate(input, e.state.GetPlayer(playerID)) {
                 e.state.ApplyInput(playerID, input)
             }
         }
     }
-    e.inputs = make(map[string][]PlayerInput)
+    e.pendingInputs = make(map[string][]PlayerInput)
 }
 
-func (e *GameEngine) broadcastState() {
+func (e *Engine) broadcastState() {
     state := e.state.Snapshot()
     data, _ := proto.Marshal(state)
     
-    // Broadcast via LiveKit DataChannel (unreliable for speed)
-    e.lk.BroadcastData("state", data, DataPacketConfig{
-        Reliable: false,
-    })
+    // Broadcast to all connected players
+    for _, player := range e.state.Players() {
+        e.transport.SendUnreliable(player.Addr, data)
+    }
 }
 ```
 
-### 4. Protocol Handlers
-
-All communication uses Protocol Buffers over DataChannels:
+### 3. Input Validation & Anti-Cheat
 
 ```go
-func (h *ProtocolHandler) handleGamePacket(pkt *livekit.DataPacket) {
-    switch pkt.Topic {
-    case "input":
-        var input PlayerInput
-        proto.Unmarshal(pkt.Payload, &input)
-        h.engine.AddInput(pkt.ParticipantID, input)
-        
-    case "events":
-        var event GameEvent
-        proto.Unmarshal(pkt.Payload, &event)
-        h.handleEvent(pkt.ParticipantID, event)
-        
-    case "chat":
-        var msg ChatMessage
-        proto.Unmarshal(pkt.Payload, &msg)
-        h.handleChat(msg)
+// internal/game/validation.go
+package game
+
+type InputValidator struct {
+    maxSpeed      float64
+    maxTurnRate   float64
+    history       map[string]*InputHistory
+}
+
+type InputHistory struct {
+    inputs     []TimedInput
+    lastPos    Position
+    lastTime   time.Time
+}
+
+func (v *InputValidator) Validate(input PlayerInput, player *Player) error {
+    history := v.history[player.ID]
+    
+    // Speed check
+    if input.MoveSpeed > v.maxSpeed*1.05 { // 5% tolerance
+        return ErrSpeedHack
     }
+    
+    // Teleport check
+    dist := distance(history.lastPos, input.Position)
+    elapsed := time.Since(history.lastTime).Seconds()
+    if dist/elapsed > v.maxSpeed*2 {
+        return ErrTeleport
+    }
+    
+    // Rate check
+    if len(history.inputs) > 120 { // 2 seconds at 60Hz
+        recent := history.inputs[len(history.inputs)-120:]
+        if timeBetween(recent) < 10*time.Millisecond {
+            return ErrInputSpam
+        }
+    }
+    
+    history.lastPos = input.Position
+    history.lastTime = time.Now()
+    return nil
+}
+```
+
+### 4. LiveKit Integration (Voice/Video Only)
+
+```go
+// internal/livekit/tokens.go
+package livekit
+
+import (
+    "github.com/livekit/protocol/auth"
+)
+
+type TokenGenerator struct {
+    apiKey    string
+    apiSecret string
+}
+
+// Generate token for voice/video room
+func (t *TokenGenerator) GenerateVoiceToken(playerID, roomName string) (string, error) {
+    at := auth.NewAccessToken(t.apiKey, t.apiSecret)
+    
+    grant := &auth.VideoGrant{
+        RoomJoin: true,
+        Room:     roomName,
+        CanPublish: true,
+        CanSubscribe: true,
+    }
+    
+    at.AddGrant(grant).
+        SetIdentity(playerID).
+        SetValidFor(time.Hour)
+    
+    return at.ToJWT()
 }
 ```
 
 ### 5. Matchmaker
 
-Queue-based matchmaking:
-
 ```go
+// internal/matchmaker/queue.go
+package matchmaker
+
 type Matchmaker struct {
-    queues     map[string]*Queue  // gameID -> queue
-    matchTimeout time.Duration
+    queues    map[string]*Queue
+    redis     *redis.Client
 }
 
-func (m *Matchmaker) FindMatch(gameID, playerID string, skill int) (*Match, error) {
-    queue := m.queues[gameID]
+type Match struct {
+    ID       string
+    Players  []string
+    ServerAddr string
+    VoiceRoom  string
+}
+
+func (m *Matchmaker) FindMatch(gameType string, playerID string, skill int) (*Match, error) {
+    queue := m.queues[gameType]
     
-    // Skill-based matching with tolerance
-    match := queue.Find(func(p *QueuedPlayer) bool {
-        return abs(p.Skill-skill) < 100
-    })
+    // Skill-based matching
+    candidate := queue.FindMatch(skill, 100) // ±100 skill
     
-    if match != nil {
-        // Create LiveKit room
-        room, _ := m.lk.CreateRoom(gameID + "-" + uuid.New())
+    if candidate != nil {
+        matchID := uuid.New().String()
         
-        // Return room info and tokens
+        // Assign game server
+        server := m.assignServer()
+        
+        // Create LiveKit room for voice
+        voiceRoom := "voice-" + matchID
+        m.livekit.CreateRoom(voiceRoom)
+        
         return &Match{
-            RoomID: room.Name,
-            Tokens: map[string]string{
-                match.PlayerID: m.lk.Token(match.PlayerID, room),
-                playerID:       m.lk.Token(playerID, room),
-            },
+            ID:         matchID,
+            Players:    []string{candidate.PlayerID, playerID},
+            ServerAddr: server.UDPAddr,
+            VoiceRoom:  voiceRoom,
         }, nil
     }
     
@@ -221,220 +320,119 @@ func (m *Matchmaker) FindMatch(gameID, playerID string, skill int) (*Match, erro
 }
 ```
 
-### 6. Leaderboard Service
+## Protocol Definitions
 
-```go
-type Leaderboard struct {
-    redis  *redis.Client
-    db     *sql.DB
+```protobuf
+// proto/game.proto
+syntax = "proto3";
+
+package gameserver;
+
+// Player input (client -> server)
+message PlayerInput {
+    uint32 sequence = 1;
+    uint64 timestamp = 2;
+    
+    // Movement
+    float move_x = 3;
+    float move_y = 4;
+    
+    // Actions
+    repeated Action actions = 5;
 }
 
-func (l *Leaderboard) Update(gameID, playerID string, score int) error {
-    ctx := context.Background()
-    
-    // Update Redis sorted set (fast)
-    l.redis.ZAdd(ctx, "lb:"+gameID, &redis.Z{
-        Score:  float64(score),
-        Member: playerID,
-    })
-    
-    // Persist to PostgreSQL (async)
-    go l.db.Exec(
-        "INSERT INTO scores (game_id, player_id, score) VALUES ($1, $2, $3) ON CONFLICT UPDATE",
-        gameID, playerID, score,
-    )
-    
-    return nil
+message Action {
+    uint32 type = 1;  // JUMP, SHOOT, INTERACT, etc.
+    float target_x = 2;
+    float target_y = 3;
 }
 
-func (l *Leaderboard) GetRank(gameID, playerID string) (int, error) {
-    return l.redis.ZRank(context.Background(), "lb:"+gameID, playerID).Result()
+// Game state (server -> client)
+message GameState {
+    uint32 tick = 1;
+    uint64 timestamp = 2;
+    repeated EntityState entities = 3;
+    repeated PlayerState players = 4;
 }
-```
 
-## DataChannel Topics
-
-| Topic | Mode | Direction | Purpose |
-|-------|------|-----------|---------|
-| `input` | Unreliable, ordered | Client → Server | Player inputs |
-| `state` | Unreliable | Server → Clients | Game state snapshots |
-| `events` | Reliable | Bidirectional | Game events (kills, powerups) |
-| `chat` | Reliable | Bidirectional | Chat messages |
-| `voice` | Built-in | Bidirectional | Voice via LiveKit |
-| `video` | Built-in | Bidirectional | Video via LiveKit |
-
-## LiveKit Integration
-
-### Token Generation
-
-```go
-func (s *AuthService) GenerateToken(playerID, roomName string, isServer bool) (string, error) {
-    at := auth.NewAccessToken(s.lkAPIKey, s.lkAPISecret)
-    
-    grant := &auth.VideoGrant{
-        RoomJoin: true,
-        Room:     roomName,
-    }
-    
-    if isServer {
-        // Server gets admin privileges
-        grant.RoomAdmin = true
-        grant.CanPublishData = true
-        grant.CanSubscribe = true
-    } else {
-        grant.CanPublishData = true
-        grant.CanSubscribe = true
-    }
-    
-    at.AddGrant(grant).
-        SetIdentity(playerID).
-        SetName(playerID).
-        SetValidFor(time.Hour)
-    
-    return at.ToJWT()
+message EntityState {
+    uint32 id = 1;
+    float x = 2;
+    float y = 3;
+    float rotation = 4;
+    uint32 state = 5;  // Animation state
 }
-```
 
-### Room Creation
-
-```go
-func (s *RoomService) CreateGameRoom(gameID string) (*livekit.Room, error) {
-    return s.lkClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
-        Name:            gameID + "-" + uuid.New().String()[:8],
-        EmptyTimeout:    300,  // 5 min timeout
-        MaxParticipants: 100,
-        Metadata:        fmt.Sprintf(`{"game":"%s"}`, gameID),
-    })
+message PlayerState {
+    string id = 1;
+    float x = 2;
+    float y = 3;
+    float health = 4;
+    uint32 score = 5;
 }
-```
 
-### Webhook Handling
+// Reliable messages
+message ChatMessage {
+    string from = 1;
+    string text = 2;
+    uint64 timestamp = 3;
+}
 
-```go
-func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
-    event, _ := webhook.Receive(r, h.lkAPIKey)
-    
-    switch event.Event {
-    case livekit.WebhookEventRoomStarted:
-        log.Info("Room started", "room", event.Room.Name)
-        
-    case livekit.WebhookEventParticipantJoined:
-        h.onPlayerJoin(event.Room.Name, event.Participant.Identity)
-        
-    case livekit.WebhookEventParticipantLeft:
-        h.onPlayerLeave(event.Room.Name, event.Participant.Identity)
-        
-    case livekit.WebhookEventRoomFinished:
-        h.onRoomEnd(event.Room.Name)
+message MatchEvent {
+    oneof event {
+        MatchStart start = 1;
+        MatchEnd end = 2;
+        PlayerJoin join = 3;
+        PlayerLeave leave = 4;
     }
 }
 ```
 
-## Anti-Cheat
+## HTTP API
 
-### Input Validation
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `POST /auth/login` | POST | Player authentication |
+| `POST /auth/register` | POST | New player registration |
+| `GET /auth/token` | GET | Get game server auth token |
+| `GET /auth/voice-token` | GET | Get LiveKit voice token |
+| `POST /match/queue` | POST | Join matchmaking queue |
+| `GET /match/status` | GET | Check queue status |
+| `GET /stats/{player}` | GET | Player statistics |
+| `GET /leaderboard` | GET | Game leaderboard |
 
-```go
-type InputValidator struct {
-    maxInputsPerTick int
-    state            *GameState
-}
+## DataChannel Topics (for future LiveKit fallback)
 
-func (v *InputValidator) Validate(input PlayerInput) bool {
-    // Rate limit
-    if len(input.Actions) > v.maxInputsPerTick {
-        return false
-    }
-    
-    // Movement speed check
-    if input.MoveX > 1.0 || input.MoveX < -1.0 {
-        return false
-    }
-    
-    // Impossibility check (teleport detection)
-    lastPos := v.state.GetPosition(input.PlayerID)
-    newPos := calculateNewPos(lastPos, input)
-    if distance(lastPos, newPos) > v.maxSpeed {
-        return false // Impossible movement
-    }
-    
-    return true
-}
-```
-
-### Server Authority Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `full` | All state computed by server | Competitive games |
-| `validated` | Client predicts, server validates | Fast-paced action |
-| `observer` | Server only observes, no authority | Casual/party games |
-
-## Database Schema
-
-### PostgreSQL
-
-```sql
--- Players
-CREATE TABLE players (
-    id UUID PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE,
-    created_at TIMESTAMP DEFAULT NOW(),
-    metadata JSONB
-);
-
--- Scores
-CREATE TABLE scores (
-    id UUID PRIMARY KEY,
-    game_id VARCHAR(100) NOT NULL,
-    player_id UUID REFERENCES players(id),
-    score INTEGER NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW(),
-    INDEX idx_game_score (game_id, score DESC)
-);
-
--- Match history
-CREATE TABLE matches (
-    id UUID PRIMARY KEY,
-    game_id VARCHAR(100) NOT NULL,
-    room_id VARCHAR(100) NOT NULL,
-    players UUID[] NOT NULL,
-    winner UUID,
-    started_at TIMESTAMP,
-    ended_at TIMESTAMP,
-    metadata JSONB
-);
-```
-
-### Redis Keys
-
-```
-player:{id}:online       → "1" (TTL: 60s, heartbeat)
-lb:{game_id}            → ZSET (leaderboard)
-queue:{game_id}         → LIST (matchmaking queue)
-room:{room_id}:players  → SET (active players)
-```
+| Topic | Mode | Purpose |
+|-------|------|---------|
+| `voice` | Built-in | Voice chat |
+| `video` | Built-in | Video chat |
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|------------|
-| **Language** | Go (services) + Rust (game engine core) |
-| **Runtime** | Go 1.21+ |
-| **HTTP** | Chi or Fiber |
-| **LiveKit SDK** | go-livekit |
+| **Language** | Go 1.21+ |
+| **Transport** | UDP (primary), QUIC (optional) |
+| **Media** | LiveKit (voice/video only) |
 | **Database** | PostgreSQL 15+ |
 | **Cache** | Redis 7+ |
 | **Protocol** | Protocol Buffers |
-| **Container** | Docker + Compose |
+| **Monitoring** | Prometheus + Grafana |
 
 ## Configuration
 
 ```yaml
 # config.yaml
 server:
-  http_port: 8080
+  http_addr: ":8080"
+  udp_addr: ":9000"
+  
+transport:
+  type: udp  # udp or quic
+  max_message_size: 1400
+  send_buffer: 1024
+  recv_buffer: 1024
   
 livekit:
   host: "https://your-livekit.cloud"
@@ -448,8 +446,55 @@ redis:
   url: "${REDIS_URL}"
   
 game:
-  default_tick_rate: 60
-  authority_mode: "validated"
+  tick_rate: 60
+  max_players_per_room: 16
+```
+
+## Version Goals
+
+### v0.3 (Current)
+- [ ] UDP transport implementation
+- [ ] Transport abstraction interface
+- [ ] HTTP auth endpoints
+- [ ] Basic game state management
+- [ ] Input validation
+- [ ] LiveKit voice token generation
+
+### v0.4
+- [ ] Matchmaking queue
+- [ ] Client prediction support
+- [ ] Delta compression for state
+- [ ] Leaderboards
+
+### v1.0
+- [ ] QUIC transport option
+- [ ] Advanced anti-cheat
+- [ ] Horizontal scaling
+- [ ] Spectator mode
+- [ ] Replay system
+
+## Testing Strategy
+
+```go
+// Use mock transport for testing
+func TestGameEngine(t *testing.T) {
+    mock := transport.NewMock()
+    engine := game.NewEngine(mock, game.Config{TickRate: 60})
+    
+    // Simulate player input
+    mock.SimulateMessage("player1:1234", &PlayerInput{
+        Sequence: 1,
+        MoveX: 1.0,
+    })
+    
+    // Run ticks
+    engine.Tick()
+    engine.Tick()
+    
+    // Verify state broadcast
+    msgs := mock.SentMessages("player1:1234")
+    assert.Len(t, msgs, 2)
+}
 ```
 
 ## Deployment
@@ -459,10 +504,11 @@ game:
 ```yaml
 version: '3.8'
 services:
-  api:
-    build: ./cmd/api
+  game-server:
+    build: .
     ports:
-      - "8080:8080"
+      - "8080:8080"   # HTTP
+      - "9000:9000/udp"  # UDP game traffic
     environment:
       - DATABASE_URL=postgres://...
       - REDIS_URL=redis://redis:6379
@@ -472,49 +518,22 @@ services:
       - postgres
       - redis
       
-  authority:
-    build: ./cmd/authority
-    environment:
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-    depends_on:
-      - redis
-      
   postgres:
-    image: postgres:15
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      
+    image: postgres:15-alpine
+    
   redis:
     image: redis:7-alpine
-    volumes:
-      - redisdata:/data
-
-volumes:
-  pgdata:
-  redisdata:
 ```
 
-## Version Goals
+## Key Changes from v0.2
 
-### v0.2 (Current)
-- [ ] LiveKit integration
-- [ ] HTTP auth/token endpoints
-- [ ] Basic game authority service
-- [ ] Protocol definitions
-- [ ] Matchmaking queue
-
-### v0.3
-- [ ] Input validation/anti-cheat
-- [ ] Leaderboard service
-- [ ] Match history
-- [ ] Webhook handling
-
-### v1.0
-- [ ] Full authority modes
-- [ ] Rollback netcode support
-- [ ] Replay recording (LiveKit Egress)
-- [ ] Horizontal scaling
+| Aspect | v0.2 | v0.3 |
+|--------|------|------|
+| **Transport** | LiveKit-only | UDP primary, LiveKit for media |
+| **Architecture** | Coupled to LiveKit | Pluggable transport interface |
+| **Game traffic** | DataChannels | Pure UDP |
+| **Voice/video** | DataChannels | LiveKit (proper use) |
+| **Flexibility** | Vendor locked | Can swap transports |
 
 ## License
 
@@ -522,5 +541,6 @@ MIT License
 
 ## Version History
 
-- **v0.2** (2025): Unified LiveKit-only architecture
+- **v0.3** (2026): Hybrid architecture - UDP for game, LiveKit for media
+- **v0.2** (2026): LiveKit-only architecture (archived)
 - **v0.1** (Archived): Initial Rust/Node specs
