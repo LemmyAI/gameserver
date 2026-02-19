@@ -450,6 +450,225 @@ game:
   max_players_per_room: 16
 ```
 
+### 6. Reliable UDP Implementation
+
+```go
+// internal/transport/reliable.go
+package transport
+
+type ReliableSender struct {
+    pending     map[uint32]*PendingPacket
+    nextSeq     uint32
+    maxRetries  int
+    retryDelay  time.Duration
+}
+
+type PendingPacket struct {
+    seq       uint32
+    data      []byte
+    addr      string
+    sentAt    time.Time
+    retries   int
+}
+
+func (r *ReliableSender) Send(addr string, data []byte) error {
+    seq := r.nextSeq
+    r.nextSeq++
+    
+    // Wrap with sequence number
+    packet := Packet{
+        Seq:  seq,
+        Type: PacketTypeReliable,
+        Data: data,
+    }
+    
+    // Store for retry
+    r.pending[seq] = &PendingPacket{
+        seq:     seq,
+        data:    packet.Marshal(),
+        addr:    addr,
+        sentAt:  time.Now(),
+        retries: 0,
+    }
+    
+    return r.sendRaw(addr, packet.Marshal())
+}
+
+func (r *ReliableSender) OnAck(seq uint32) {
+    delete(r.pending, seq)
+}
+
+func (r *ReliableSender) RetryLoop() {
+    ticker := time.NewTicker(r.retryDelay)
+    for range ticker.C {
+        now := time.Now()
+        for seq, p := range r.pending {
+            if now.Sub(p.sentAt) > r.retryDelay {
+                if p.retries >= r.maxRetries {
+                    delete(r.pending, seq)
+                    continue
+                }
+                r.sendRaw(p.addr, p.data)
+                p.sentAt = now
+                p.retries++
+            }
+        }
+    }
+}
+```
+
+### 7. Delta Compression
+
+```go
+// internal/game/delta.go
+package game
+
+type DeltaCompressor struct {
+    lastState  map[string]*EntityState
+    maxDelta   int // Max entities per delta
+}
+
+type StateDelta struct {
+    BaseTick   uint32
+    Created    []EntityState
+    Updated    []EntityDelta
+    Removed    []uint32
+}
+
+type EntityDelta struct {
+    ID         uint32
+    Fields     []FieldDelta
+}
+
+type FieldDelta struct {
+    FieldID    uint8
+    Value      interface{}
+}
+
+func (d *DeltaCompressor) Compress(fullState *GameState) []byte {
+    delta := &StateDelta{
+        BaseTick: fullState.Tick - 1,
+    }
+    
+    for _, entity := range fullState.Entities {
+        last, exists := d.lastState[entity.ID]
+        
+        if !exists {
+            // New entity
+            delta.Created = append(delta.Created, *entity)
+        } else {
+            // Check what changed
+            eDelta := EntityDelta{ID: entity.ID}
+            
+            if entity.X != last.X {
+                eDelta.Fields = append(eDelta.Fields, 
+                    FieldDelta{FieldID: FieldX, Value: entity.X})
+            }
+            if entity.Y != last.Y {
+                eDelta.Fields = append(eDelta.Fields, 
+                    FieldDelta{FieldID: FieldY, Value: entity.Y})
+            }
+            // ... other fields
+            
+            if len(eDelta.Fields) > 0 {
+                delta.Updated = append(delta.Updated, eDelta)
+            }
+        }
+    }
+    
+    // Check for removed entities
+    for id := range d.lastState {
+        if _, exists := fullState.Entities[id]; !exists {
+            delta.Removed = append(delta.Removed, id)
+        }
+    }
+    
+    // Update last state
+    d.lastState = make(map[string]*EntityState)
+    for _, e := range fullState.Entities {
+        d.lastState[e.ID] = e
+    }
+    
+    return delta.Marshal()
+}
+```
+
+### 8. Player Reconnection
+
+```go
+// internal/game/reconnect.go
+package game
+
+type ReconnectionManager struct {
+    sessions    map[string]*PlayerSession
+    timeout     time.Duration
+    redis       *redis.Client
+}
+
+type PlayerSession struct {
+    PlayerID    string
+    MatchID     string
+    LastSeen    time.Time
+    State       *PlayerState
+    Addr        string
+}
+
+func (r *ReconnectionManager) OnDisconnect(playerID string) {
+    session, exists := r.sessions[playerID]
+    if !exists {
+        return
+    }
+    
+    // Store session for reconnection
+    session.LastSeen = time.Now()
+    r.redis.Set(ctx, "session:"+playerID, session, r.timeout)
+    
+    // Don't remove from game immediately - give time to reconnect
+    go r.waitForReconnect(session)
+}
+
+func (r *ReconnectionManager) waitForReconnect(session *PlayerSession) {
+    deadline := time.Now().Add(r.timeout)
+    
+    for time.Now().Before(deadline) {
+        // Check if player reconnected
+        if newSession, err := r.redis.Get(ctx, "session:"+session.PlayerID).Result(); err == nil {
+            // Player reconnected elsewhere
+            r.OnReconnect(session.PlayerID, newSession.Addr)
+            return
+        }
+        time.Sleep(100 * time.Millisecond)
+    }
+    
+    // Timeout - remove from game
+    r.removePlayer(session.PlayerID)
+}
+
+func (r *ReconnectionManager) OnReconnect(playerID, newAddr string) *PlayerSession {
+    data, err := r.redis.Get(ctx, "session:"+playerID).Bytes()
+    if err != nil {
+        return nil // Session expired
+    }
+    
+    var session PlayerSession
+    json.Unmarshal(data, &session)
+    
+    // Update address
+    session.Addr = newAddr
+    session.LastSeen = time.Now()
+    
+    // Send full state sync to catch up
+    r.sendFullStateSync(playerID)
+    
+    return &session
+}
+
+func (r *ReconnectionManager) sendFullStateSync(playerID string) {
+    // Send complete game state to reconnecting player
+    // They may have missed updates during disconnect
+}
+```
+
 ## Version Goals
 
 ### v0.3 (Current)
@@ -459,11 +678,13 @@ game:
 - [ ] Basic game state management
 - [ ] Input validation
 - [ ] LiveKit voice token generation
+- [ ] Reliable UDP with ACK/retry
 
 ### v0.4
 - [ ] Matchmaking queue
 - [ ] Client prediction support
 - [ ] Delta compression for state
+- [ ] Player reconnection handling
 - [ ] Leaderboards
 
 ### v1.0
