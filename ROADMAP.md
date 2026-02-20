@@ -106,15 +106,16 @@ Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
 
 ---
 
-## Phase 3: Game Rooms & Shareable Links
+## Phase 3: Game Rooms & LiveKit Voice/Video
 
-### Goal: Players can create a game room and share a link with friends
+### Goal: Players can create a game room and share a link with friends. Everyone can see and hear each other while in the room (before and during game).
 
 ### Architecture
 ```
 Create Game → Get unique room ID → Share link: localhost:8081/room/ABC123
                                           ↓
-                            Friends join same room, play together
+                            Friends join same room → LiveKit video grid
+                            Everyone sees/hears each other immediately
 ```
 
 ### Day 1-2: Room Management
@@ -124,21 +125,29 @@ Create Game → Get unique room ID → Share link: localhost:8081/room/ABC123
 - [ ] Max players per room (configurable, default 8)
 
 ### Day 3-4: HTTP API
-- [ ] `POST /rooms` → create room, returns `{roomId, joinLink}`
+- [ ] `POST /rooms` → create room, returns `{roomId, joinLink, livekitToken}`
 - [ ] `GET /rooms/{id}` → room info (player count, status)
 - [ ] `DELETE /rooms/{id}` → close room (host only)
 
-### Day 5-6: Webbridge Updates
+### Day 5-7: LiveKit Integration
+- [ ] LiveKit server setup (self-hosted or cloud)
+- [ ] Generate LiveKit tokens per player join
+- [ ] Create room on first player join
+- [ ] Video grid UI component in browser
+- [ ] Mute/ camera toggle controls
+- [ ] Auto-join video room when entering game room
+
+### Day 8-9: Webbridge Updates
 - [ ] URL routing: `/room/{roomId}` → join specific room
 - [ ] WebSocket joins correct room context
 - [ ] Room isolation (players only see others in same room)
 - [ ] Landing page: "Create Game" button → generates shareable link
 
-### Day 7-8: UI Polish
-- [ ] Room lobby screen (waiting for players)
+### Day 10-11: UI Polish
+- [ ] Room lobby screen with video grid
 - [ ] "Share Link" button with clipboard copy
-- [ ] Player list in room
-- [ ] "Start Game" when ready
+- [ ] Player list with mute/camera status
+- [ ] "Start Game" when ready (voice/video continues during game)
 
 ### Deliverable
 ```bash
@@ -147,7 +156,22 @@ curl -X POST http://localhost:8081/rooms
 # → {"roomId": "ABC123", "link": "http://localhost:8081/room/ABC123"}
 
 # Share link with friends
-# Everyone opens the link → same game room → play together
+# Everyone opens the link → video grid appears → see and hear each other
+# Game starts → voice/video continues in corner overlay
+```
+
+### LiveKit Setup
+```bash
+# Self-hosted (Docker)
+docker run -d \
+  -v $PWD/livekit.yaml:/livekit.yaml \
+  -p 7880:7880 \
+  -p 7881:7881 \
+  livekit/livekit-server \
+  --config /livekit.yaml
+
+# Or use LiveKit Cloud (free tier available)
+# API keys stored in config, tokens generated per-player
 ```
 
 ---
@@ -201,6 +225,10 @@ require (
     github.com/google/uuid v1.6.0  ✅ (room IDs, player IDs)
     google.golang.org/protobuf v1.36.0  ✅
     github.com/gorilla/websocket v1.5.3  ✅ (webbridge)
+    
+    // Phase 3:
+    github.com/livekit/server-sdk-go/v2 v2.0.0  (LiveKit tokens, room mgmt)
+    github.com/livekit/protocol v1.0.0  (LiveKit protocol)
     
     // Future (not needed yet):
     // github.com/redis/go-redis/v9  (if room persistence needed)
