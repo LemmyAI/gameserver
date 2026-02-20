@@ -69,6 +69,43 @@
 
 ---
 
+## Phase 2.5: WebSocket Browser Client ✅ COMPLETE (2026-02-20)
+
+### Goal: Browser-based canvas client with real-time multiplayer
+
+### What We Built
+- [x] Web bridge (cmd/webbridge) - WebSocket to UDP gateway on port 8081
+- [x] Canvas rendering with glow effects and smooth 60fps interpolation
+- [x] Real-time multiplayer - each browser tab gets unique player ID
+- [x] Input handling - WASD/Arrow keys with mobile touch support
+- [x] Player tracking by ID (not address) for webbridge multi-tenancy
+
+### Architecture
+```
+Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
+                         ↓
+              One UDP socket per browser tab (unique player ID)
+              Broadcasts state deltas to all connected clients
+```
+
+### Lessons Learned
+- Players from webbridge all come from same IP:port (127.0.0.1:XXXXX)
+- Must track players by ID, not by address
+- Webbridge translates between WebSocket and UDP protobuf protocols
+- Broadcast delta updates to all connected browsers, not just the sender
+
+### Deliverable
+```bash
+# Run both servers:
+./bin/server         # UDP game server on :9000
+./bin/webbridge      # WebSocket bridge on :8081
+
+# Open http://localhost:8081 in multiple tabs
+# Each tab is a unique player, all see each other moving in real-time
+```
+
+---
+
 ## Phase 3: Matchmaking + Auth (Week 5-6)
 
 ### Goal: Players can find matches and authenticate
