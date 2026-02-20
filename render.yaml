@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: gameserver
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 9000
+    # UDP is not supported on Render free tier web services
+    # This will run the UDP server but won't be accessible externally
+    # For testing, we can verify the server starts correctly

@@ -4,6 +4,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -51,15 +52,28 @@ func main() {
 	// Start game engine
 	srv.engine.Start()
 
-	// Start listening
-	addr := ":9000"
-	log.Printf("🎧 Listening on UDP %s", addr)
-	if err := t.Listen(addr); err != nil {
+	// Start HTTP health server (for Render)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8000"
+	}
+	go startHTTPServer(port, srv)
+
+	// Start UDP listener
+	udpPort := os.Getenv("UDP_PORT")
+	if udpPort == "" {
+		udpPort = ":9000"
+	} else {
+		udpPort = ":" + udpPort
+	}
+	log.Printf("🎧 Listening on UDP %s", udpPort)
+	if err := t.Listen(udpPort); err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	log.Printf("✅ Server ready!")
-	log.Printf("   Connect with: make test-client")
+	log.Printf("   UDP: %s", udpPort)
+	log.Printf("   HTTP: :%s", port)
 	log.Printf("   Tick rate: %d Hz, World: %.0fx%.0f", config.TickRate, config.WorldWidth, config.WorldHeight)
 
 	// Wait for shutdown signal
@@ -73,6 +87,44 @@ func main() {
 		log.Printf("Error closing: %v", err)
 	}
 	log.Println("👋 Bye!")
+}
+
+// startHTTPServer starts an HTTP server for health checks and metrics.
+func startHTTPServer(port string, srv *Server) {
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("READY"))
+	})
+
+	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"players": ` + itoa(srv.engine.PlayerCount()) + `}`))
+	})
+
+	log.Printf("🏥 HTTP server listening on :%s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Printf("HTTP server error: %v", err)
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [12]byte
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[pos:])
 }
 
 // handleMessage processes incoming messages.
