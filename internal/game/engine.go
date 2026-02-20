@@ -16,23 +16,25 @@ type Broadcaster interface {
 
 // Engine runs the game tick loop.
 type Engine struct {
-	state       *State
-	config      Config
-	broadcaster Broadcaster
-	tickRate    time.Duration
-	running     bool
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
+	state        *State
+	config       Config
+	broadcaster  Broadcaster
+	tickRate     time.Duration
+	running      bool
+	stopCh       chan struct{}
+	wg           sync.WaitGroup
+	deltaTracker *DeltaTracker
 }
 
 // NewEngine creates a new game engine.
 func NewEngine(config Config, broadcaster Broadcaster) *Engine {
 	return &Engine{
-		state:       NewState(config),
-		config:      config,
-		broadcaster: broadcaster,
-		tickRate:    time.Second / time.Duration(config.TickRate),
-		stopCh:      make(chan struct{}),
+		state:        NewState(config),
+		config:       config,
+		broadcaster:  broadcaster,
+		tickRate:     time.Second / time.Duration(config.TickRate),
+		stopCh:       make(chan struct{}),
+		deltaTracker: NewDeltaTracker(),
 	}
 }
 
@@ -88,39 +90,44 @@ func (e *Engine) tickLoop() {
 func (e *Engine) tick() {
 	tick := e.state.Tick()
 
+	// Process all queued inputs
+	e.state.ProcessInputs()
+
 	// Future: Process AI, physics, collisions, etc.
-	// For now, just update tick count
 
 	_ = tick // Tick is tracked in state
 }
 
-// broadcastState sends state updates to all players.
+// broadcastState sends state updates to all players using delta compression.
 func (e *Engine) broadcastState() {
 	players := e.state.AllPlayers()
 	if len(players) == 0 {
 		return
 	}
 
-	// Build state snapshot
-	snapshot := &gamepb.GameStateSnapshot{
-		Tick:      e.state.CurrentTick(),
-		Timestamp: uint64(time.Now().UnixMilli()),
-		Players:   make([]*gamepb.PlayerState, 0, len(players)),
+	// Compute delta
+	changed, removed := e.deltaTracker.ComputeDelta(players, false)
+
+	// Skip if nothing changed
+	if len(changed) == 0 && len(removed) == 0 {
+		return
 	}
 
-	for _, p := range players {
-		snapshot.Players = append(snapshot.Players, &gamepb.PlayerState{
-			PlayerId: p.ID,
-			Position: &gamepb.Vec2{X: p.Position.X, Y: p.Position.Y},
-			Velocity: &gamepb.Vec2{X: p.Velocity.X, Y: p.Velocity.Y},
-			Rotation: 0,
-			Timestamp: uint64(p.LastSeen.UnixMilli()),
-		})
+	// Build delta message
+	delta := &gamepb.GameStateDelta{
+		Tick:           e.state.CurrentTick(),
+		Timestamp:      uint64(time.Now().UnixMilli()),
+		ChangedPlayers: make([]*gamepb.PlayerState, 0, len(changed)),
+		RemovedPlayers: removed,
+	}
+
+	for _, p := range changed {
+		delta.ChangedPlayers = append(delta.ChangedPlayers, p.ToProto())
 	}
 
 	msg := &gamepb.Message{
-		Payload: &gamepb.Message_StateSnapshot{
-			StateSnapshot: snapshot,
+		Payload: &gamepb.Message_StateDelta{
+			StateDelta: delta,
 		},
 	}
 
@@ -133,6 +140,11 @@ func (e *Engine) broadcastState() {
 // State returns the game state for external access.
 func (e *Engine) State() *State {
 	return e.state
+}
+
+// CurrentTick returns the current game tick.
+func (e *Engine) CurrentTick() uint64 {
+	return e.state.CurrentTick()
 }
 
 // AddPlayer adds a player to the game.
@@ -171,6 +183,9 @@ func (e *Engine) RemovePlayer(id string) {
 
 	e.state.RemovePlayer(id)
 
+	// Clear from delta tracker
+	delete(e.deltaTracker.lastStates, id)
+
 	// Notify others of leave
 	if e.broadcaster != nil {
 		msg := &gamepb.Message{
@@ -200,4 +215,36 @@ func (e *Engine) GetPlayerByAddr(addr string) *Player {
 // PlayerCount returns current player count.
 func (e *Engine) PlayerCount() int {
 	return e.state.PlayerCount()
+}
+
+// SendFullSnapshot sends a complete state snapshot to a specific player.
+// Use when a player first joins.
+func (e *Engine) SendFullSnapshot(addr string) {
+	players := e.state.AllPlayers()
+
+	snapshot := &gamepb.GameStateSnapshot{
+		Tick:      e.state.CurrentTick(),
+		Timestamp: uint64(time.Now().UnixMilli()),
+		Players:   make([]*gamepb.PlayerState, 0, len(players)),
+	}
+
+	for _, p := range players {
+		snapshot.Players = append(snapshot.Players, &gamepb.PlayerState{
+			PlayerId: p.ID,
+			Position: &gamepb.Vec2{X: p.Position.X, Y: p.Position.Y},
+			Velocity: &gamepb.Vec2{X: p.Velocity.X, Y: p.Velocity.Y},
+			Rotation: 0,
+			Timestamp: uint64(p.LastSeen.UnixMilli()),
+		})
+	}
+
+	msg := &gamepb.Message{
+		Payload: &gamepb.Message_StateSnapshot{
+			StateSnapshot: snapshot,
+		},
+	}
+
+	if e.broadcaster != nil {
+		e.broadcaster.SendTo(addr, msg)
+	}
 }

@@ -99,15 +99,26 @@ func TestApplyInput(t *testing.T) {
 	p := state.AddPlayer("TestPlayer", "127.0.0.1:1234")
 	initialX := p.Position.X
 
-	// Apply input to move right
-	state.ApplyInput(p.ID, Input{
+	// Queue input - ApplyInput now queues for later processing
+	success := state.ApplyInput(p.ID, Input{
 		Sequence: 1,
-		Movement: Vec2{X: 1, Y: 0},
+		Movement:  Vec2{X: 1, Y: 0},
 	})
+	if !success {
+		t.Error("expected ApplyInput to return true")
+	}
 
-	// After one tick, should have moved 1 unit right
+	// Position shouldn't change until ProcessInputs
+	if p.Position.X != initialX {
+		t.Errorf("position changed before ProcessInputs: %.2f -> %.2f", initialX, p.Position.X)
+	}
+
+	// Process queued inputs
+	state.ProcessInputs()
+
+	// After processing, position should have moved
 	if p.Position.X <= initialX {
-		t.Errorf("expected position to increase, got %.2f -> %.2f", initialX, p.Position.X)
+		t.Errorf("expected position to increase after ProcessInputs, got %.2f -> %.2f", initialX, p.Position.X)
 	}
 
 	// Velocity should be set
@@ -135,12 +146,13 @@ func TestApplyInputWorldBounds(t *testing.T) {
 	p := state.AddPlayer("TestPlayer", "127.0.0.1:1234")
 	p.Position.X = 99 // Near right edge
 
-	// Try to move past boundary
+	// Apply multiple inputs and process each time
 	for i := 0; i < 10; i++ {
 		state.ApplyInput(p.ID, Input{
 			Sequence: uint64(i + 1),
-			Movement: Vec2{X: 1, Y: 0},
+			Movement:  Vec2{X: 1, Y: 0},
 		})
+		state.ProcessInputs()
 	}
 
 	if p.Position.X > config.WorldWidth {
@@ -211,5 +223,11 @@ func BenchmarkApplyInput(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		input.Sequence = uint64(i + 1)
 		state.ApplyInput(p.ID, input)
+		// Process every 10 inputs to simulate tick loop
+		if i%10 == 0 {
+			state.ProcessInputs()
+		}
 	}
+	// Process remaining
+	state.ProcessInputs()
 }

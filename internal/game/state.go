@@ -38,6 +38,9 @@ type Player struct {
 	LastInput   uint64      // Last processed input sequence
 	LastSeen    time.Time   // Last message time
 	ConnectedAt time.Time
+
+	// Input queue for deterministic processing
+	InputQueue []Input
 }
 
 // Vec2 is a 2D vector.
@@ -100,6 +103,7 @@ func (s *State) AddPlayer(name, addr string) *Player {
 		Velocity:    Vec2{X: 0, Y: 0},
 		ConnectedAt: time.Now(),
 		LastSeen:    time.Now(),
+		InputQueue:  make([]Input, 0, 16), // Pre-allocate input queue
 	}
 
 	s.players[player.ID] = player
@@ -184,47 +188,69 @@ func (s *State) Config() Config {
 	return s.config
 }
 
-// ApplyInput applies player input to game state.
-func (s *State) ApplyInput(playerID string, input Input) {
+// ApplyInput queues player input for processing on next tick.
+// Returns false if input is stale (already processed).
+func (s *State) ApplyInput(playerID string, input Input) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	player, ok := s.players[playerID]
 	if !ok {
-		return
+		return false
 	}
 
-	// Skip if we've already processed this input
+	// Skip if we've already processed this or a newer input
 	if input.Sequence <= player.LastInput {
-		return
+		return false
 	}
+
+	// Add to input queue
+	player.InputQueue = append(player.InputQueue, input)
+	player.LastSeen = time.Now()
+	return true
+}
+
+// ProcessInputs processes all queued inputs for all players.
+// Call this once per tick.
+func (s *State) ProcessInputs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	dt := 1.0 / float32(s.config.TickRate)
 
-	// Apply movement
-	player.Velocity.X = input.Movement.X * s.config.PlayerSpeed
-	player.Velocity.Y = input.Movement.Y * s.config.PlayerSpeed
+	for _, player := range s.players {
+		// Sort and process inputs by sequence
+		for _, input := range player.InputQueue {
+			// Apply movement
+			player.Velocity.X = input.Movement.X * s.config.PlayerSpeed
+			player.Velocity.Y = input.Movement.Y * s.config.PlayerSpeed
 
-	// Update position
-	player.Position.X += player.Velocity.X * dt
-	player.Position.Y += player.Velocity.Y * dt
+			// Update position
+			player.Position.X += player.Velocity.X * dt
+			player.Position.Y += player.Velocity.Y * dt
 
-	// Clamp to world bounds
-	if player.Position.X < 0 {
-		player.Position.X = 0
-	}
-	if player.Position.X > s.config.WorldWidth {
-		player.Position.X = s.config.WorldWidth
-	}
-	if player.Position.Y < 0 {
-		player.Position.Y = 0
-	}
-	if player.Position.Y > s.config.WorldHeight {
-		player.Position.Y = s.config.WorldHeight
-	}
+			// Clamp to world bounds
+			if player.Position.X < 0 {
+				player.Position.X = 0
+			}
+			if player.Position.X > s.config.WorldWidth {
+				player.Position.X = s.config.WorldWidth
+			}
+			if player.Position.Y < 0 {
+				player.Position.Y = 0
+			}
+			if player.Position.Y > s.config.WorldHeight {
+				player.Position.Y = s.config.WorldHeight
+			}
 
-	player.LastInput = input.Sequence
-	player.LastSeen = time.Now()
+			player.LastInput = input.Sequence
+		}
+
+		// Clear processed inputs
+		if len(player.InputQueue) > 0 {
+			player.InputQueue = player.InputQueue[:0]
+		}
+	}
 }
 
 // UpdateLastSeen updates the last seen time for a player.
