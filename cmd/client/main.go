@@ -38,9 +38,12 @@ func main() {
 
 	log.Printf("🎮 Connecting to %s as %s...", *serverAddr, *playerName)
 
+	// Generate client-side player ID
+	playerID := fmt.Sprintf("client-%d", time.Now().UnixNano()%100000)
+
 	// Send ClientHello
 	hello := protocol.NewClientHello(
-		fmt.Sprintf("player-%d", time.Now().UnixNano()%10000),
+		playerID,
 		*playerName,
 		"0.1.0",
 	)
@@ -54,6 +57,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Write: %v", err)
 	}
+	log.Printf("📤 Sent ClientHello")
+
 	log.Printf("📤 Sent ClientHello")
 
 	// Start receive goroutine
@@ -82,8 +87,8 @@ func main() {
 
 				switch p := msg.Payload.(type) {
 				case *gamepb.Message_ServerWelcome:
-					log.Printf("✅ ServerWelcome: tick_rate=%d, server_time=%d",
-						p.ServerWelcome.TickRate, p.ServerWelcome.ServerTime)
+					log.Printf("✅ ServerWelcome: player_id=%s, tick_rate=%d",
+						p.ServerWelcome.PlayerId, p.ServerWelcome.TickRate)
 				case *gamepb.Message_StateSnapshot:
 					log.Printf("📊 StateSnapshot: tick=%d, players=%d",
 						p.StateSnapshot.Tick, len(p.StateSnapshot.Players))
@@ -127,7 +132,7 @@ func main() {
 			continue
 		}
 
-		input := protocol.NewPlayerInput(seq, uint64(time.Now().UnixMilli()), x, y, jump, false, false)
+		input := protocol.NewPlayerInput(playerID, seq, uint64(time.Now().UnixMilli()), x, y, jump, false, false)
 		data, err := protocol.Encode(input)
 		if err != nil {
 			log.Printf("Encode error: %v", err)

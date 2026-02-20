@@ -198,7 +198,7 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 			ts := uint64(time.Now().UnixMilli())
 			seq := ts
 
-			input := protocol.NewPlayerInput(seq, ts, float32(dx), float32(dy), false, false, false)
+			input := protocol.NewPlayerInput(client.playerID, seq, ts, float32(dx), float32(dy), false, false, false)
 			inputData, _ := protocol.Encode(input)
 			b.udpConn.Write(inputData)
 		}

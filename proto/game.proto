@@ -34,6 +34,7 @@ message Vec2 {
 
 // PlayerInput represents input from a client
 message PlayerInput {
+  string player_id = 7;      // Player ID (required for shared connections)
   uint64 sequence = 1;       // Sequence number for ordering
   uint64 timestamp = 2;      // Client timestamp
   Vec2 movement = 3;         // Movement direction (-1 to 1)

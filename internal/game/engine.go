@@ -174,6 +174,33 @@ func (e *Engine) AddPlayer(name, addr string) *Player {
 	return player
 }
 
+// AddPlayerWithID adds a player with a specific ID to the game.
+func (e *Engine) AddPlayerWithID(name, playerID, addr string) *Player {
+	player := e.state.AddPlayerWithID(name, playerID, addr)
+	if player == nil {
+		return nil
+	}
+
+	// Notify others of join
+	if e.broadcaster != nil {
+		msg := &gamepb.Message{
+			Payload: &gamepb.Message_PlayerJoin{
+				PlayerJoin: &gamepb.PlayerJoin{
+					Player: &gamepb.PlayerState{
+						PlayerId: player.ID,
+						Position: &gamepb.Vec2{X: player.Position.X, Y: player.Position.Y},
+						Velocity: &gamepb.Vec2{X: player.Velocity.X, Y: player.Velocity.Y},
+					},
+				},
+			},
+		}
+		e.broadcaster.Broadcast(msg, player.ID)
+	}
+
+	log.Printf("✅ Player joined: %s (%s) at (%.1f, %.1f)", name, player.ID, player.Position.X, player.Position.Y)
+	return player
+}
+
 // RemovePlayer removes a player from the game.
 func (e *Engine) RemovePlayer(id string) {
 	player := e.state.GetPlayer(id)

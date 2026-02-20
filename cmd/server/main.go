@@ -22,7 +22,7 @@ type Server struct {
 	transport   transport.Transport
 	engine      *game.Engine
 	broadcaster *game.TransportBroadcaster
-	playerMap   map[string]string // addr -> playerID
+	playerMap   map[string]string // playerID -> addr (multiple players per addr OK)
 	mu          sync.RWMutex
 }
 
@@ -154,38 +154,55 @@ func (s *Server) handleConnect(addr string) {
 
 // handleDisconnect handles disconnections.
 func (s *Server) handleDisconnect(addr string) {
+	// Find all players at this address and remove them
 	s.mu.Lock()
-	playerID, ok := s.playerMap[addr]
-	delete(s.playerMap, addr)
+	var toRemove []string
+	for playerID, playerAddr := range s.playerMap {
+		if playerAddr == addr {
+			toRemove = append(toRemove, playerID)
+		}
+	}
+	for _, playerID := range toRemove {
+		delete(s.playerMap, playerID)
+	}
 	s.mu.Unlock()
 
-	if ok {
+	for _, playerID := range toRemove {
 		s.engine.RemovePlayer(playerID)
 	}
 }
 
 // handleClientHello handles new player connections.
 func (s *Server) handleClientHello(addr string, hello *gamepb.ClientHello) {
-	// Check if already connected
+	playerID := hello.PlayerId
+	if playerID == "" {
+		log.Printf("❌ [%s] empty player ID", addr)
+		return
+	}
+
+	// Check if player ID already exists
 	s.mu.RLock()
-	_, exists := s.playerMap[addr]
+	_, exists := s.playerMap[playerID]
 	s.mu.RUnlock()
 
 	if exists {
-		log.Printf("⚠️  [%s] already connected", addr)
+		// Player already connected, just update address
+		s.mu.Lock()
+		s.playerMap[playerID] = addr
+		s.mu.Unlock()
 		return
 	}
 
 	// Add player to game
-	player := s.engine.AddPlayer(hello.PlayerName, addr)
+	player := s.engine.AddPlayerWithID(hello.PlayerName, playerID, addr)
 	if player == nil {
-		log.Printf("❌ [%s] server full", addr)
+		log.Printf("❌ [%s] server full or ID conflict", addr)
 		return
 	}
 
-	// Track addr -> playerID mapping
+	// Track playerID -> addr mapping
 	s.mu.Lock()
-	s.playerMap[addr] = player.ID
+	s.playerMap[playerID] = addr
 	s.mu.Unlock()
 
 	// Send welcome
@@ -200,16 +217,22 @@ func (s *Server) handleClientHello(addr string, hello *gamepb.ClientHello) {
 		return
 	}
 
-	log.Printf("👋 [%s] Welcome sent to %s (id=%s)", addr, hello.PlayerName, player.ID)
+	log.Printf("👋 [%s] Welcome to %s (id=%s)", addr, hello.PlayerName, player.ID)
 }
 
 // handlePlayerInput handles player input.
 func (s *Server) handlePlayerInput(addr string, input *gamepb.PlayerInput) {
+	playerID := input.PlayerId
+	if playerID == "" {
+		return
+	}
+
+	// Verify this player exists
 	s.mu.RLock()
-	playerID, ok := s.playerMap[addr]
+	_, exists := s.playerMap[playerID]
 	s.mu.RUnlock()
 
-	if !ok {
+	if !exists {
 		return
 	}
 

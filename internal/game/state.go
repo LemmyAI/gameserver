@@ -82,12 +82,34 @@ func (s *State) AddPlayer(name, addr string) *Player {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if player with this addr already exists
-	for _, p := range s.players {
-		if p.Addr == addr {
-			p.LastSeen = time.Now()
-			return p
-		}
+	// Check max players
+	if len(s.players) >= s.config.MaxPlayers {
+		return nil
+	}
+
+	player := &Player{
+		ID:          uuid.New().String()[:8], // Short ID
+		Name:        name,
+		Addr:        addr,
+		Position:    Vec2{X: s.config.WorldWidth / 2, Y: s.config.WorldHeight / 2}, // Spawn center
+		Velocity:    Vec2{X: 0, Y: 0},
+		ConnectedAt: time.Now(),
+		LastSeen:    time.Now(),
+		InputQueue:  make([]Input, 0, 16), // Pre-allocate input queue
+	}
+
+	s.players[player.ID] = player
+	return player
+}
+
+// AddPlayerWithID creates and adds a new player with a specific ID.
+func (s *State) AddPlayerWithID(name, playerID, addr string) *Player {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if player ID already exists
+	if _, exists := s.players[playerID]; exists {
+		return nil
 	}
 
 	// Check max players
@@ -96,7 +118,7 @@ func (s *State) AddPlayer(name, addr string) *Player {
 	}
 
 	player := &Player{
-		ID:          uuid.New().String()[:8], // Short ID
+		ID:          playerID,
 		Name:        name,
 		Addr:        addr,
 		Position:    Vec2{X: s.config.WorldWidth / 2, Y: s.config.WorldHeight / 2}, // Spawn center

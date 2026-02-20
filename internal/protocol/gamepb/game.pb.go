@@ -199,9 +199,10 @@ func (x *Vec2) GetY() float32 {
 // PlayerInput represents input from a client
 type PlayerInput struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sequence      uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`   // Sequence number for ordering
-	Timestamp     uint64                 `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // Client timestamp
-	Movement      *Vec2                  `protobuf:"bytes,3,opt,name=movement,proto3" json:"movement,omitempty"`    // Movement direction (-1 to 1)
+	PlayerId      string                 `protobuf:"bytes,7,opt,name=player_id,json=playerId,proto3" json:"player_id,omitempty"` // Player ID (required for shared connections)
+	Sequence      uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`                // Sequence number for ordering
+	Timestamp     uint64                 `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`              // Client timestamp
+	Movement      *Vec2                  `protobuf:"bytes,3,opt,name=movement,proto3" json:"movement,omitempty"`                 // Movement direction (-1 to 1)
 	Jump          bool                   `protobuf:"varint,4,opt,name=jump,proto3" json:"jump,omitempty"`
 	Action_1      bool                   `protobuf:"varint,5,opt,name=action_1,json=action1,proto3" json:"action_1,omitempty"` // Generic action buttons
 	Action_2      bool                   `protobuf:"varint,6,opt,name=action_2,json=action2,proto3" json:"action_2,omitempty"`
@@ -237,6 +238,13 @@ func (x *PlayerInput) ProtoReflect() protoreflect.Message {
 // Deprecated: Use PlayerInput.ProtoReflect.Descriptor instead.
 func (*PlayerInput) Descriptor() ([]byte, []int) {
 	return file_proto_game_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PlayerInput) GetPlayerId() string {
+	if x != nil {
+		return x.PlayerId
+	}
+	return ""
 }
 
 func (x *PlayerInput) GetSequence() uint64 {
@@ -770,8 +778,9 @@ const file_proto_game_proto_rawDesc = "" +
 	"serverTime\"\"\n" +
 	"\x04Vec2\x12\f\n" +
 	"\x01x\x18\x01 \x01(\x02R\x01x\x12\f\n" +
-	"\x01y\x18\x02 \x01(\x02R\x01y\"\xb9\x01\n" +
-	"\vPlayerInput\x12\x1a\n" +
+	"\x01y\x18\x02 \x01(\x02R\x01y\"\xd6\x01\n" +
+	"\vPlayerInput\x12\x1b\n" +
+	"\tplayer_id\x18\a \x01(\tR\bplayerId\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x04R\ttimestamp\x12&\n" +
 	"\bmovement\x18\x03 \x01(\v2\n" +

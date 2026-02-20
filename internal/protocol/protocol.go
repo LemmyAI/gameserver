@@ -49,17 +49,18 @@ func NewServerWelcome(playerID string, tickRate uint32, serverTime uint64) *game
 }
 
 // NewPlayerInput creates a PlayerInput message wrapped in Message.
-func NewPlayerInput(sequence, timestamp uint64, x, y float32, jump, action1, action2 bool) *gamepb.Message {
+func NewPlayerInput(playerID string, sequence, timestamp uint64, x, y float32, jump, action1, action2 bool) *gamepb.Message {
 	return &gamepb.Message{
 		Payload: &gamepb.Message_PlayerInput{
 			PlayerInput: &gamepb.PlayerInput{
+				PlayerId:  playerID,
 				Sequence:  sequence,
 				Timestamp: timestamp,
 				Movement: &gamepb.Vec2{
 					X: float32(x),
 					Y: float32(y),
 				},
-				Jump:    jump,
+				Jump:     jump,
 				Action_1: action1,
 				Action_2: action2,
 			},
