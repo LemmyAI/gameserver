@@ -1,4 +1,4 @@
-// Game client with room support
+// Game client with room support and LiveKit video
 
 // Get room ID from URL: /room/{roomId}
 const pathParts = window.location.pathname.split('/');
@@ -12,6 +12,11 @@ let players = {};
 let myPlayer = { x: 500, y: 500, vx: 0, vy: 0 };
 let keys = { up: false, down: false, left: false, right: false };
 
+// LiveKit
+let room = null;
+let micEnabled = true;
+let camEnabled = true;
+
 // Canvas setup
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -23,14 +28,247 @@ function resizeCanvas() {
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
-// Connect to WebSocket
+// ================== LiveKit ==================
+
+async function connectLiveKit() {
+    if (!ROOM_ID || !myId) {
+        console.log('No room or player ID yet, skipping LiveKit');
+        return;
+    }
+
+    try {
+        // Get token from server
+        const res = await fetch('/livekit/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                roomId: ROOM_ID,
+                playerId: myId,
+                playerName: PLAYER_NAME
+            })
+        });
+
+        if (!res.ok) {
+            console.error('Failed to get LiveKit token');
+            return;
+        }
+
+        const { token, url } = await res.json();
+        console.log('🎥 Connecting to LiveKit:', url);
+
+        // Connect to LiveKit room
+        room = new LivekitClient.Room({
+            adaptiveStream: true,
+            dynacast: true,
+        });
+
+        // Handle participants
+        room.on(LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
+            console.log('👋 Participant joined:', participant.identity);
+            addVideoTrack(participant);
+        });
+
+        room.on(LivekitClient.RoomEvent.ParticipantDisconnected, (participant) => {
+            console.log('👋 Participant left:', participant.identity);
+            removeVideoTrack(participant.identity);
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+            console.log('📺 Track subscribed:', track.kind, 'from', participant.identity);
+            if (track.kind === 'video' || track.kind === 'audio') {
+                addVideoTrack(participant, track);
+            }
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+            console.log('📺 Track unsubscribed:', track.kind);
+            if (track.kind === 'video') {
+                removeVideoTrack(participant.identity);
+            }
+        });
+
+        // Connect
+        await room.connect(url, token);
+        console.log('✅ Connected to LiveKit room:', room.name);
+
+        // Publish local tracks
+        await publishLocalTracks();
+
+        // Add existing participants
+        room.participants.forEach((participant) => {
+            addVideoTrack(participant);
+        });
+
+        // Add self to video grid
+        addSelfToGrid();
+
+    } catch (err) {
+        console.error('LiveKit connection error:', err);
+        showToast('Video connection failed');
+    }
+}
+
+async function publishLocalTracks() {
+    try {
+        // Publish microphone
+        const audioTrack = await LivekitClient.createLocalAudioTrack();
+        await room.localParticipant.publishTrack(audioTrack);
+        console.log('🎤 Published audio track');
+
+        // Publish camera
+        const videoTrack = await LivekitClient.createLocalVideoTrack();
+        await room.localParticipant.publishTrack(videoTrack);
+        console.log('📷 Published video track');
+
+    } catch (err) {
+        console.error('Failed to publish tracks:', err);
+        // Try just audio if video fails
+        try {
+            const audioTrack = await LivekitClient.createLocalAudioTrack();
+            await room.localParticipant.publishTrack(audioTrack);
+        } catch (e) {
+            console.error('Audio also failed:', e);
+        }
+    }
+}
+
+function addSelfToGrid() {
+    const grid = document.getElementById('video-grid');
+    const div = document.createElement('div');
+    div.className = 'video-tile self';
+    div.id = `video-${myId}`;
+
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true; // Mute self
+    video.playsInline = true;
+
+    // Attach local video
+    if (room && room.localParticipant.videoTrackPublications.size > 0) {
+        room.localParticipant.videoTrackPublications.forEach((pub) => {
+            if (pub.track) {
+                video.srcObject = new MediaStream([pub.track.mediaStreamTrack]);
+            }
+        });
+    }
+
+    const label = document.createElement('span');
+    label.className = 'video-label';
+    label.textContent = 'You';
+
+    div.appendChild(video);
+    div.appendChild(label);
+    grid.appendChild(div);
+}
+
+function addVideoTrack(participant, track = null) {
+    const grid = document.getElementById('video-grid');
+    let div = document.getElementById(`video-${participant.identity}`);
+
+    if (!div) {
+        div = document.createElement('div');
+        div.className = 'video-tile';
+        div.id = `video-${participant.identity}`;
+
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        video.id = `video-el-${participant.identity}`;
+        div.appendChild(video);
+
+        const label = document.createElement('span');
+        label.className = 'video-label';
+        label.textContent = participant.name || participant.identity;
+        div.appendChild(label);
+
+        grid.appendChild(div);
+    }
+
+    // Attach track if provided
+    if (track && (track.kind === 'video' || track.kind === 'audio')) {
+        const video = document.getElementById(`video-el-${participant.identity}`);
+        if (video) {
+            if (track.kind === 'video') {
+                video.srcObject = new MediaStream([track.mediaStreamTrack]);
+            } else if (track.kind === 'audio') {
+                // Add audio to existing video element
+                const stream = video.srcObject || new MediaStream();
+                stream.addTrack(track.mediaStreamTrack);
+                video.srcObject = stream;
+            }
+        }
+    } else {
+        // Find any video/audio tracks for this participant
+        participant.videoTrackPublications?.forEach((pub) => {
+            if (pub.track) {
+                const video = document.getElementById(`video-el-${participant.identity}`);
+                if (video) {
+                    const stream = video.srcObject || new MediaStream();
+                    stream.addTrack(pub.track.mediaStreamTrack);
+                    video.srcObject = stream;
+                }
+            }
+        });
+        participant.audioTrackPublications?.forEach((pub) => {
+            if (pub.track) {
+                const video = document.getElementById(`video-el-${participant.identity}`);
+                if (video) {
+                    const stream = video.srcObject || new MediaStream();
+                    stream.addTrack(pub.track.mediaStreamTrack);
+                    video.srcObject = stream;
+                }
+            }
+        });
+    }
+
+    updatePlayerCount();
+}
+
+function removeVideoTrack(identity) {
+    const div = document.getElementById(`video-${identity}`);
+    if (div) {
+        div.remove();
+    }
+    updatePlayerCount();
+}
+
+function updatePlayerCount() {
+    const grid = document.getElementById('video-grid');
+    const count = grid.children.length;
+    document.getElementById('player-count').textContent = count;
+}
+
+async function toggleMic() {
+    if (!room) return;
+
+    micEnabled = !micEnabled;
+    const btn = document.getElementById('btn-mic');
+    btn.textContent = micEnabled ? '🎤' : '🔇';
+    btn.classList.toggle('disabled', !micEnabled);
+
+    await room.localParticipant.setMicrophoneEnabled(micEnabled);
+}
+
+async function toggleCam() {
+    if (!room) return;
+
+    camEnabled = !camEnabled;
+    const btn = document.getElementById('btn-cam');
+    btn.textContent = camEnabled ? '📷' : '📵';
+    btn.classList.toggle('disabled', !camEnabled);
+
+    await room.localParticipant.setCameraEnabled(camEnabled);
+}
+
+// ================== WebSocket ==================
+
 function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
         console.log('🔌 Connected to server');
-        
+
         // If we have a room ID, join the room
         if (ROOM_ID) {
             ws.send(JSON.stringify({
@@ -39,7 +277,7 @@ function connect() {
                 name: PLAYER_NAME
             }));
         }
-        
+
         // Say hello to game server
         ws.send(JSON.stringify({
             type: 'hello',
@@ -69,6 +307,8 @@ function handleMessage(data) {
             myId = data.yourId;
             document.getElementById('player-id').textContent = myId;
             document.getElementById('share-link').value = window.location.href;
+            // Connect to LiveKit after getting player ID
+            connectLiveKit();
             break;
 
         case 'room_joined':
@@ -85,6 +325,7 @@ function handleMessage(data) {
 
         case 'player_left':
             showToast(`${data.playerName} left`);
+            removeVideoTrack(data.playerId);
             break;
 
         case 'state':
@@ -136,7 +377,7 @@ document.addEventListener('keyup', (e) => {
 // Mobile controls (if present)
 document.querySelectorAll('.dpad-btn').forEach(btn => {
     const dir = btn.dataset.dir;
-    
+
     btn.addEventListener('touchstart', (e) => {
         e.preventDefault();
         if (dir === 'up') keys.up = true;
@@ -144,7 +385,7 @@ document.querySelectorAll('.dpad-btn').forEach(btn => {
         if (dir === 'left') keys.left = true;
         if (dir === 'right') keys.right = true;
     });
-    
+
     btn.addEventListener('touchend', (e) => {
         e.preventDefault();
         if (dir === 'up') keys.up = false;

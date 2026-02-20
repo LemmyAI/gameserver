@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -27,7 +28,33 @@ type Server struct {
 }
 
 func main() {
-	log.Println("🎮 GameServer starting...")
+	// Parse flags
+	udpPort := flag.String("udp", "", "UDP port to listen on (default from env or 9000)")
+	httpPort := flag.String("http", "", "HTTP port (default from env or 8000)")
+	roomID := flag.String("room", "", "Room ID for logging")
+	flag.Parse()
+
+	log.Printf("🎮 GameServer starting... (room: %s)", *roomID)
+
+	// Determine ports
+	udpAddr := *udpPort
+	if udpAddr == "" {
+		udpAddr = os.Getenv("UDP_PORT")
+	}
+	if udpAddr == "" {
+		udpAddr = "9000"
+	}
+	if udpAddr[0] != ':' {
+		udpAddr = ":" + udpAddr
+	}
+
+	httpAddr := *httpPort
+	if httpAddr == "" {
+		httpAddr = os.Getenv("PORT")
+	}
+	if httpAddr == "" {
+		httpAddr = "8000"
+	}
 
 	// Create UDP transport
 	t := transport.NewUDPTransport(transport.DefaultConfig())
@@ -52,28 +79,19 @@ func main() {
 	// Start game engine
 	srv.engine.Start()
 
-	// Start HTTP health server (for Render)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8000"
-	}
-	go startHTTPServer(port, srv)
+	// Start HTTP health server
+	go startHTTPServer(httpAddr, srv)
 
 	// Start UDP listener
-	udpPort := os.Getenv("UDP_PORT")
-	if udpPort == "" {
-		udpPort = ":9000"
-	} else {
-		udpPort = ":" + udpPort
-	}
-	log.Printf("🎧 Listening on UDP %s", udpPort)
-	if err := t.Listen(udpPort); err != nil {
+	log.Printf("🎧 Listening on UDP %s", udpAddr)
+	if err := t.Listen(udpAddr); err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	log.Printf("✅ Server ready!")
-	log.Printf("   UDP: %s", udpPort)
-	log.Printf("   HTTP: :%s", port)
+	log.Printf("   UDP: %s", udpAddr)
+	log.Printf("   HTTP: :%s", httpAddr)
+	log.Printf("   Tick rate: %d Hz, World: %.0fx%.0f", config.TickRate, config.WorldWidth, config.WorldHeight)
 	log.Printf("   Tick rate: %d Hz, World: %.0fx%.0f", config.TickRate, config.WorldWidth, config.WorldHeight)
 
 	// Wait for shutdown signal

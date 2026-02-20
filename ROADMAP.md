@@ -112,66 +112,70 @@ Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
 
 ### Architecture
 ```
-Create Game → Get unique room ID → Share link: localhost:8081/room/ABC123
+Create Game → Get unique room ID → Share link: localhost:8081/room/{43-char-id}
                                           ↓
                             Friends join same room → LiveKit video grid
                             Everyone sees/hears each other immediately
 ```
 
-### Day 1-2: Room Management
-- [ ] Generate unique room IDs (short, shareable: ABC123 format)
-- [ ] Room lifecycle: create, join, leave, expire (empty for 5 min)
-- [ ] In-memory room registry (Redis later if needed)
-- [ ] Max players per room (configurable, default 8)
+### Day 1-2: Room Management ✅ COMPLETE
+- [x] Generate unique room IDs (43-char cryptographically secure)
+- [x] Room lifecycle: create, join, leave, expire (1 min TTL)
+- [x] In-memory room registry
+- [x] Max 8 players per room (configurable)
+- [x] Per-room game server spawning (true isolation)
 
-### Day 3-4: HTTP API
-- [ ] `POST /rooms` → create room, returns `{roomId, joinLink, livekitToken}`
-- [ ] `GET /rooms/{id}` → room info (player count, status)
-- [ ] `DELETE /rooms/{id}` → close room (host only)
+### Day 3-4: HTTP API ✅ COMPLETE
+- [x] `POST /rooms` → create room, returns `{roomId, joinLink}`
+- [x] `GET /rooms/{id}` → room info (player count, status)
+- [x] `DELETE /rooms/{id}` → close room
 
-### Day 5-7: LiveKit Integration
-- [ ] LiveKit server setup (self-hosted or cloud)
-- [ ] Generate LiveKit tokens per player join
-- [ ] Create room on first player join
-- [ ] Video grid UI component in browser
-- [ ] Mute/ camera toggle controls
-- [ ] Auto-join video room when entering game room
+### Day 5-7: LiveKit Integration ✅ COMPLETE
+- [x] LiveKit server config (livekit.yaml)
+- [x] Generate LiveKit tokens per player join (`POST /livekit/token`)
+- [x] Create room on first player join
+- [x] Video grid UI component in browser
+- [x] Mute/camera toggle controls
+- [x] Auto-join video room when entering game room
 
-### Day 8-9: Webbridge Updates
-- [ ] URL routing: `/room/{roomId}` → join specific room
-- [ ] WebSocket joins correct room context
-- [ ] Room isolation (players only see others in same room)
-- [ ] Landing page: "Create Game" button → generates shareable link
+### Day 8-9: Webbridge Updates ✅ COMPLETE
+- [x] URL routing: `/room/{roomId}` → join specific room
+- [x] WebSocket joins correct room context
+- [x] Room isolation (players only see others in same room)
+- [x] Landing page: "Create Room" button → generates shareable link
 
-### Day 10-11: UI Polish
-- [ ] Room lobby screen with video grid
-- [ ] "Share Link" button with clipboard copy
-- [ ] Player list with mute/camera status
+### Day 10-11: UI Polish ⏳ TODO
+- [ ] Room lobby screen with video grid before game starts
+- [ ] "Share Link" button with better UX
+- [ ] Player list with mute/camera status icons
 - [ ] "Start Game" when ready (voice/video continues during game)
 
 ### Deliverable
 ```bash
+# Run full stack:
+./run.sh   # Starts LiveKit (Docker) + WebBridge
+
 # Player creates room:
 curl -X POST http://localhost:8081/rooms
-# → {"roomId": "ABC123", "link": "http://localhost:8081/room/ABC123"}
+# → {"roomId": "xK9mN2pQ7vR3wY8zA1bC...", "joinLink": "http://localhost:8081/room/..."}
 
 # Share link with friends
 # Everyone opens the link → video grid appears → see and hear each other
-# Game starts → voice/video continues in corner overlay
+# Game runs in same view → voice/video in corner panel
 ```
 
-### LiveKit Setup
+### LiveKit Setup ✅ DONE
 ```bash
-# Self-hosted (Docker)
+# Self-hosted via Docker (automated in run.sh)
 docker run -d \
   -v $PWD/livekit.yaml:/livekit.yaml \
   -p 7880:7880 \
   -p 7881:7881 \
-  livekit/livekit-server \
+  -p 50000-50200:50000-50200/udp \
+  livekit/livekit-server:latest \
   --config /livekit.yaml
 
-# Or use LiveKit Cloud (free tier available)
-# API keys stored in config, tokens generated per-player
+# API keys configured in livekit.yaml + environment variables
 ```
 
 ---
@@ -206,7 +210,7 @@ docker run -d \
 | Phase 1 | ✅ UDP echo working |
 | Phase 2 | ✅ Multiplayer state sync at 60Hz |
 | Phase 2.5 | ✅ Browser canvas client with real-time multiplayer |
-| Phase 3 | ⏳ Game rooms & shareable links |
+| Phase 3 | ✅ Game rooms + LiveKit voice/video (UI polish remaining) |
 | Phase 4 | ⏳ Polish & production deployment |
 
 ## Benchmarks
@@ -225,10 +229,8 @@ require (
     github.com/google/uuid v1.6.0  ✅ (room IDs, player IDs)
     google.golang.org/protobuf v1.36.0  ✅
     github.com/gorilla/websocket v1.5.3  ✅ (webbridge)
-    
-    // Phase 3:
-    github.com/livekit/server-sdk-go/v2 v2.0.0  (LiveKit tokens, room mgmt)
-    github.com/livekit/protocol v1.0.0  (LiveKit protocol)
+    github.com/livekit/server-sdk-go/v2 v2.13.3  ✅ (LiveKit tokens)
+    github.com/livekit/protocol v1.44.0  ✅ (LiveKit protocol)
     
     // Future (not needed yet):
     // github.com/redis/go-redis/v9  (if room persistence needed)

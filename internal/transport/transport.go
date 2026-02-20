@@ -49,6 +49,7 @@ type Config struct {
 	RecvBufferSize int
 	ReadTimeout    time.Duration
 	WriteTimeout   time.Duration
+	ListenAddr     string // Address to listen on (e.g., ":9000")
 }
 
 // DefaultConfig returns sensible defaults.
@@ -59,5 +60,6 @@ func DefaultConfig() Config {
 		RecvBufferSize: 1024,
 		ReadTimeout:    5 * time.Second,
 		WriteTimeout:   5 * time.Second,
+		ListenAddr:     ":9000",
 	}
 }

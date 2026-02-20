@@ -2,7 +2,8 @@ package room
 
 import (
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +22,15 @@ func DefaultConfig() Config {
 		RoomTTL:       5 * time.Minute,
 		CleanupPeriod: 30 * time.Second,
 	}
+}
+
+// generateID creates a long, secure room ID (32 bytes = 43 base64 chars)
+// Example: "xK9mN2pQ7vR3wY8zA1bC4dE6fG0hJ5kL8mN9oP2qR"
+func generateID() string {
+	b := make([]byte, 32) // 32 bytes = 256 bits of entropy
+	rand.Read(b)
+	id := base64.RawURLEncoding.EncodeToString(b)
+	return strings.ToLower(id) // lowercase for URL-friendly
 }
 
 // Player in a room
@@ -63,13 +73,6 @@ func NewRegistry(config Config) *Registry {
 	}
 	go r.cleanupLoop()
 	return r
-}
-
-// generateID creates a short, shareable room ID
-func generateID() string {
-	b := make([]byte, 3) // 6 hex chars
-	rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 // Create creates a new room and returns it

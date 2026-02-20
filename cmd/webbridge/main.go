@@ -1,5 +1,6 @@
 // WebBridge - WebSocket to UDP bridge with room support
-// Browser (WebSocket) ↔ WebBridge ↔ GameServer (UDP/Protobuf)
+// Each room spawns a separate game server process (true isolation)
+// LiveKit integration for voice/video in each room
 package main
 
 import (
@@ -8,12 +9,15 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/google/uuid"
+	"github.com/livekit/protocol/auth"
 
 	"github.com/LemmyAI/gameserver/internal/protocol"
 	"github.com/LemmyAI/gameserver/internal/protocol/gamepb"
@@ -24,6 +28,20 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// LiveKit config from environment
+var (
+	livekitURL       = getEnv("LIVEKIT_URL", "ws://localhost:7880")
+	livekitAPIKey    = getEnv("LIVEKIT_API_KEY", "devkey")
+	livekitAPISecret = getEnv("LIVEKIT_API_SECRET", "secret123456789abcdefghij")
+)
+
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
 type BrowserClient struct {
 	ws       *websocket.Conn
 	playerID string
@@ -31,46 +49,111 @@ type BrowserClient struct {
 	roomID   string
 }
 
+// GameRoom holds the game server process and connection for one room
+type GameRoom struct {
+	ID         string
+	UDPConn    *net.UDPConn
+	UDPAddr    *net.UDPAddr
+	Process    *exec.Cmd
+	State      map[string]*gamepb.PlayerState
+	Mu         sync.RWMutex
+}
+
 type Bridge struct {
 	clients   map[*websocket.Conn]*BrowserClient
-	udpConn   *net.UDPConn
+	gameRooms map[string]*GameRoom // roomID -> game room
 	mu        sync.RWMutex
-	gameState map[string]*gamepb.PlayerState
 	rooms     *room.Registry
+	basePort  int
 }
 
 func NewBridge() *Bridge {
 	config := room.DefaultConfig()
-	return &Bridge{
+	config.RoomTTL = 1 * time.Minute // Kill empty rooms after 1 minute
+
+	bridge := &Bridge{
 		clients:   make(map[*websocket.Conn]*BrowserClient),
-		gameState: make(map[string]*gamepb.PlayerState),
+		gameRooms: make(map[string]*GameRoom),
 		rooms:     room.NewRegistry(config),
+		basePort:  9100, // Game servers start at port 9100
 	}
+
+	// Register cleanup callback - kill game server when room expires
+	bridge.rooms.OnRoomExpired(func(r *room.Room) {
+		log.Printf("🗑️  Room %s expired (empty for 1 minute), stopping game server", r.ID)
+		bridge.stopGameRoom(r.ID)
+	})
+
+	return bridge
 }
 
-func (b *Bridge) connectToGameServer() error {
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:9000")
-	if err != nil {
-		return err
+// spawnGameServer creates a new game server process for a room
+func (b *Bridge) spawnGameServer(roomID string) (*GameRoom, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Check if already exists
+	if gr, exists := b.gameRooms[roomID]; exists {
+		return gr, nil
 	}
 
+	// Calculate port (simple: 9100 + hash of roomID)
+	port := b.basePort + (int(roomID[0]) % 1000)
+	httpPort := port + 1000
+
+	// Spawn server process
+	cmd := exec.Command("./bin/server",
+		"-udp", fmt.Sprintf("%d", port),
+		"-http", fmt.Sprintf("%d", httpPort),
+		"-room", roomID,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to spawn server: %w", err)
+	}
+
+	// Wait a bit for server to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Resolve UDP address
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("failed to resolve address: %w", err)
+	}
+
+	// Create UDP connection to the new server
 	conn, err := net.DialUDP("udp", nil, addr)
 	if err != nil {
-		return err
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("failed to dial server: %w", err)
 	}
 
-	b.udpConn = conn
-	go b.receiveUDP()
-	return nil
+	gr := &GameRoom{
+		ID:      roomID,
+		UDPConn: conn,
+		UDPAddr: addr,
+		Process: cmd,
+		State:   make(map[string]*gamepb.PlayerState),
+	}
+	b.gameRooms[roomID] = gr
+
+	// Start receiving for this room
+	go b.receiveUDP(gr)
+
+	log.Printf("🚀 Spawned game server for room %s on UDP :%d", roomID, port)
+	return gr, nil
 }
 
-func (b *Bridge) receiveUDP() {
+func (b *Bridge) receiveUDP(gr *GameRoom) {
 	buf := make([]byte, 4096)
 	for {
-		n, err := b.udpConn.Read(buf)
+		n, err := gr.UDPConn.Read(buf)
 		if err != nil {
-			log.Printf("UDP read error: %v", err)
-			continue
+			log.Printf("UDP read error for room %s: %v", gr.ID, err)
+			return
 		}
 
 		msg, err := protocol.Decode(buf[:n])
@@ -80,28 +163,30 @@ func (b *Bridge) receiveUDP() {
 
 		switch payload := msg.Payload.(type) {
 		case *gamepb.Message_ServerWelcome:
-			log.Printf("🎮 Welcome! Player ID: %s", payload.ServerWelcome.PlayerId)
+			log.Printf("🎮 Room %s: Welcome! Player ID: %s", gr.ID, payload.ServerWelcome.PlayerId)
+
 		case *gamepb.Message_StateDelta:
 			if payload.StateDelta != nil {
-				b.mu.Lock()
+				gr.Mu.Lock()
 				for _, p := range payload.StateDelta.ChangedPlayers {
-					b.gameState[p.PlayerId] = p
+					gr.State[p.PlayerId] = p
 				}
 				for _, id := range payload.StateDelta.RemovedPlayers {
-					delete(b.gameState, id)
+					delete(gr.State, id)
 				}
-				b.mu.Unlock()
-				b.broadcastState()
+				gr.Mu.Unlock()
+				b.broadcastRoomState(gr)
 			}
+
 		case *gamepb.Message_StateSnapshot:
 			if payload.StateSnapshot != nil {
-				b.mu.Lock()
-				b.gameState = make(map[string]*gamepb.PlayerState)
+				gr.Mu.Lock()
+				gr.State = make(map[string]*gamepb.PlayerState)
 				for _, p := range payload.StateSnapshot.Players {
-					b.gameState[p.PlayerId] = p
+					gr.State[p.PlayerId] = p
 				}
-				b.mu.Unlock()
-				b.broadcastState()
+				gr.Mu.Unlock()
+				b.broadcastRoomState(gr)
 			}
 		}
 	}
@@ -124,12 +209,14 @@ type StateMsg struct {
 	Players []PlayerMsg `json:"players"`
 }
 
-func (b *Bridge) broadcastState() {
+// broadcastRoomState sends state only to players in this room
+func (b *Bridge) broadcastRoomState(gr *GameRoom) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	players := make([]PlayerMsg, 0, len(b.gameState))
-	for id, p := range b.gameState {
+	gr.Mu.RLock()
+	players := make([]PlayerMsg, 0, len(gr.State))
+	for id, p := range gr.State {
 		x, y := float32(500), float32(500)
 		vx, vy := float32(0), float32(0)
 		if p.Position != nil {
@@ -147,19 +234,22 @@ func (b *Bridge) broadcastState() {
 			Rot: p.Rotation,
 		})
 	}
+	gr.Mu.RUnlock()
 
 	for ws, client := range b.clients {
-		state := StateMsg{
-			Type:    "state",
-			YourID:  client.playerID,
-			RoomID:  client.roomID,
-			Players: players,
+		if client.roomID == gr.ID {
+			state := StateMsg{
+				Type:    "state",
+				YourID:  client.playerID,
+				RoomID:  gr.ID,
+				Players: players,
+			}
+			ws.WriteJSON(state)
 		}
-		ws.WriteJSON(state)
 	}
 }
 
-// broadcastToRoom sends state only to players in a specific room
+// broadcastToRoom sends a message to all clients in a room
 func (b *Bridge) broadcastToRoom(roomID string, msg interface{}) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -171,9 +261,23 @@ func (b *Bridge) broadcastToRoom(roomID string, msg interface{}) {
 	}
 }
 
+// stopGameRoom kills the game server process for a room
+func (b *Bridge) stopGameRoom(roomID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if gr, exists := b.gameRooms[roomID]; exists {
+		if gr.Process != nil && gr.Process.Process != nil {
+			gr.Process.Process.Kill()
+			gr.UDPConn.Close()
+		}
+		delete(b.gameRooms, roomID)
+		log.Printf("🛑 Stopped game server for room %s", roomID)
+	}
+}
+
 // ================== HTTP API ==================
 
-// CreateRoomResponse is returned when creating a room
 type CreateRoomResponse struct {
 	RoomID    string `json:"roomId"`
 	JoinLink  string `json:"joinLink"`
@@ -181,7 +285,6 @@ type CreateRoomResponse struct {
 	HostID    string `json:"hostId"`
 }
 
-// RoomInfoResponse contains room details
 type RoomInfoResponse struct {
 	RoomID      string   `json:"roomId"`
 	PlayerCount int      `json:"playerCount"`
@@ -190,7 +293,6 @@ type RoomInfoResponse struct {
 	CreatedAt   int64    `json:"createdAt"`
 }
 
-// ErrorResponse for API errors
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
@@ -202,16 +304,12 @@ func (b *Bridge) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create room
 	rm := b.rooms.Create()
-
-	// Build response
 	host := r.URL.Query().Get("host")
 	if host == "" {
 		host = uuid.New().String()[:8]
 	}
 
-	// Auto-join host to room
 	rm.Join(host, "Host")
 
 	w.Header().Set("Content-Type", "application/json")
@@ -227,7 +325,6 @@ func (b *Bridge) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bridge) handleGetRoom(w http.ResponseWriter, r *http.Request) {
-	// Extract room ID from path: /rooms/{id}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/rooms/"), "/")
 	roomID := parts[0]
 	if roomID == "" {
@@ -259,11 +356,9 @@ func (b *Bridge) handleGetRoom(w http.ResponseWriter, r *http.Request) {
 func (b *Bridge) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "method not allowed"})
 		return
 	}
 
-	// Extract room ID from path
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/rooms/"), "/")
 	roomID := parts[0]
 
@@ -274,14 +369,98 @@ func (b *Bridge) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Check if requester is host
-
+	// Stop game server
+	b.stopGameRoom(roomID)
 	b.rooms.Delete(roomID)
-	log.Printf("🗑️  Room deleted: %s", roomID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+// ================== LiveKit ==================
+
+// LiveKitTokenResponse is returned when requesting a token
+type LiveKitTokenResponse struct {
+	Token    string `json:"token"`
+	RoomID   string `json:"roomId"`
+	PlayerID string `json:"playerId"`
+	URL      string `json:"url"`
+}
+
+// generateLiveKitToken creates a JWT token for a player to join a LiveKit room
+func generateLiveKitToken(roomID, playerID, playerName string) (string, error) {
+	at := auth.NewAccessToken(livekitAPIKey, livekitAPISecret)
+	grant := &auth.VideoGrant{
+		RoomJoin:       true,
+		Room:           roomID,
+		CanPublish:     boolPtr(true),
+		CanSubscribe:   boolPtr(true),
+		CanPublishData: boolPtr(true),
+	}
+	at.AddGrant(grant).
+		SetIdentity(playerID).
+		SetName(playerName).
+		SetValidFor(24 * time.Hour) // Token valid for 24 hours
+
+	return at.ToJWT()
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+func (b *Bridge) handleLiveKitToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		RoomID     string `json:"roomId"`
+		PlayerID   string `json:"playerId"`
+		PlayerName string `json:"playerName"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "invalid request"})
+		return
+	}
+
+	// Verify room exists
+	rm := b.rooms.Get(req.RoomID)
+	if rm == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "room not found"})
+		return
+	}
+
+	// Generate token
+	token, err := generateLiveKitToken(req.RoomID, req.PlayerID, req.PlayerName)
+	if err != nil {
+		log.Printf("Failed to generate LiveKit token: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "failed to generate token"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(LiveKitTokenResponse{
+		Token:    token,
+		RoomID:   req.RoomID,
+		PlayerID: req.PlayerID,
+		URL:      livekitURL,
+	})
+}
+
+func (b *Bridge) handleLiveKitConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(map[string]string{
+		"url": livekitURL,
+	})
 }
 
 // ================== WebSocket ==================
@@ -323,21 +502,27 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch data["type"] {
-		case "hello":
-			client.name, _ = data["name"].(string)
-			hello := protocol.NewClientHello(client.playerID, client.name, "1.0")
-			helloData, _ := protocol.Encode(hello)
-			b.udpConn.Write(helloData)
-
 		case "input":
+			if client.roomID == "" {
+				continue
+			}
+
+			b.mu.RLock()
+			gr, exists := b.gameRooms[client.roomID]
+			b.mu.RUnlock()
+
+			if !exists {
+				continue
+			}
+
 			dx, _ := data["dx"].(float64)
 			dy, _ := data["dy"].(float64)
 			ts := uint64(time.Now().UnixMilli())
-			seq := ts
 
-			input := protocol.NewPlayerInput(client.playerID, seq, ts, float32(dx), float32(dy), false, false, false)
-			inputData, _ := protocol.Encode(input)
-			b.udpConn.Write(inputData)
+			input := protocol.NewPlayerInput(client.playerID, ts, ts, float32(dx), float32(dy), false, false, false)
+			if inputData, err := protocol.Encode(input); err == nil {
+				gr.UDPConn.Write(inputData)
+			}
 
 		case "join_room":
 			roomID, _ := data["roomId"].(string)
@@ -358,7 +543,22 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 			client.roomID = roomID
 			client.name = playerName
 
-			// Send room joined confirmation
+			// Spawn game server for this room
+			gr, err := b.spawnGameServer(roomID)
+			if err != nil {
+				conn.WriteJSON(map[string]interface{}{
+					"type":  "error",
+					"error": "failed to start game server",
+				})
+				continue
+			}
+
+			// Send hello to game server
+			hello := protocol.NewClientHello(client.playerID, client.name, "1.0")
+			if helloData, err := protocol.Encode(hello); err == nil {
+				gr.UDPConn.Write(helloData)
+			}
+
 			conn.WriteJSON(map[string]interface{}{
 				"type":        "room_joined",
 				"roomId":      roomID,
@@ -367,7 +567,6 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 				"playerCount": rm.PlayerCount(),
 			})
 
-			// Notify others in room
 			b.broadcastToRoom(roomID, map[string]interface{}{
 				"type":        "player_joined",
 				"playerId":    client.playerID,
@@ -387,24 +586,23 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 						"playerId":   client.playerID,
 						"playerName": client.name,
 					})
-					log.Printf("🚪 %s left room %s", client.playerID, client.roomID)
 				}
 				client.roomID = ""
 			}
 		}
 	}
 
-	// Cleanup on disconnect
+	// Cleanup
 	b.mu.Lock()
 	delete(b.clients, conn)
+	roomID := client.roomID
 	b.mu.Unlock()
 
-	// Leave room if in one
-	if client.roomID != "" {
-		rm := b.rooms.Get(client.roomID)
+	if roomID != "" {
+		rm := b.rooms.Get(roomID)
 		if rm != nil {
 			rm.Leave(client.playerID)
-			b.broadcastToRoom(client.roomID, map[string]interface{}{
+			b.broadcastToRoom(roomID, map[string]interface{}{
 				"type":       "player_left",
 				"playerId":   client.playerID,
 				"playerName": client.name,
@@ -418,20 +616,18 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 func (b *Bridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	b.mu.RLock()
 	clientCount := len(b.clients)
-	pCount := len(b.gameState)
+	roomCount := len(b.gameRooms)
 	b.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"browser_clients":%d,"players":%d,"rooms":%d}`, clientCount, pCount, b.rooms.Count())
+	fmt.Fprintf(w, `{"browser_clients":%d,"game_rooms":%d,"rooms":%d}`, clientCount, roomCount, b.rooms.Count())
 }
 
-// handleLanding serves the landing page with "Create Room" button
 func (b *Bridge) handleLanding(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(landingPageHTML))
 }
 
-// handleRoomPage serves the room page (game canvas + video grid)
 func (b *Bridge) handleRoomPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(roomPageHTML))
@@ -440,34 +636,24 @@ func (b *Bridge) handleRoomPage(w http.ResponseWriter, r *http.Request) {
 func main() {
 	bridge := NewBridge()
 
-	if err := bridge.connectToGameServer(); err != nil {
-		log.Fatalf("❌ Failed to connect to game server: %v", err)
-	}
-	log.Println("✅ Connected to UDP :9000")
+	log.Println("🌐 Web Bridge: http://localhost:8081")
+	log.Println("📡 Game servers will be spawned per-room starting at port 9100")
+	log.Printf("🎥 LiveKit URL: %s\n", livekitURL)
 
-	// Static files (CSS, JS assets)
 	fs := http.FileServer(http.Dir("./cmd/webbridge/public"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
-
-	// API endpoints
-	http.HandleFunc("/rooms", bridge.handleCreateRoom)           // POST /rooms
-	http.HandleFunc("/rooms/", bridge.handleRoomRoutes)          // GET/DELETE /rooms/{id}
-
-	// WebSocket
+	http.HandleFunc("/rooms", bridge.handleCreateRoom)
+	http.HandleFunc("/rooms/", bridge.handleRoomRoutes)
 	http.HandleFunc("/ws", bridge.handleWS)
-
-	// Status endpoint
 	http.HandleFunc("/status", bridge.handleStatus)
+	http.HandleFunc("/livekit/token", bridge.handleLiveKitToken)
+	http.HandleFunc("/livekit/config", bridge.handleLiveKitConfig)
+	http.HandleFunc("/", bridge.handleLanding)
+	http.HandleFunc("/room/", bridge.handleRoomPage)
 
-	// Pages
-	http.HandleFunc("/", bridge.handleLanding)                   // Landing page
-	http.HandleFunc("/room/", bridge.handleRoomPage)             // Room page /room/{id}
-
-	log.Println("🌐 Web Bridge: http://localhost:8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
-// handleRoomRoutes dispatches to GET or DELETE for /rooms/{id}
 func (b *Bridge) handleRoomRoutes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -483,7 +669,6 @@ func (b *Bridge) handleRoomRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HTML templates are in a separate file
 var landingPageHTML = `<!DOCTYPE html>
 <html>
 <head>
@@ -501,10 +686,7 @@ var landingPageHTML = `<!DOCTYPE html>
             align-items: center;
             justify-content: center;
         }
-        .container {
-            text-align: center;
-            padding: 40px;
-        }
+        .container { text-align: center; padding: 40px; }
         h1 {
             font-size: 3rem;
             background: linear-gradient(135deg, #00d4ff, #7c3aed);
@@ -524,16 +706,9 @@ var landingPageHTML = `<!DOCTYPE html>
             font-weight: 600;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(0, 212, 255, 0.3);
-        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0, 212, 255, 0.3); }
         .btn:active { transform: translateY(0); }
-        .footer {
-            margin-top: 3rem;
-            color: #555;
-            font-size: 0.9rem;
-        }
+        .footer { margin-top: 3rem; color: #555; font-size: 0.9rem; }
     </style>
 </head>
 <body>
@@ -541,9 +716,7 @@ var landingPageHTML = `<!DOCTYPE html>
         <h1>🎮 GameServer</h1>
         <p>Create a room and invite your friends</p>
         <button class="btn" onclick="createRoom()">Create Room</button>
-        <div class="footer">
-            <p>Multiplayer game server • Voice & Video enabled</p>
-        </div>
+        <div class="footer"><p>Multiplayer game server • Voice & Video enabled</p></div>
     </div>
     <script>
         async function createRoom() {
@@ -556,25 +729,35 @@ var landingPageHTML = `<!DOCTYPE html>
 </html>
 `
 
-// roomPageHTML is loaded when joining a room /room/{id}
 var roomPageHTML = `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <title>Room</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.js"></script>
 </head>
 <body>
     <div id="app">
+        <div id="video-panel">
+            <div id="video-header">
+                <span id="room-display">Room: <span id="room-id">Loading...</span></span>
+                <div id="video-controls">
+                    <button id="btn-mic" class="control-btn" onclick="toggleMic()">🎤</button>
+                    <button id="btn-cam" class="control-btn" onclick="toggleCam()">📷</button>
+                </div>
+            </div>
+            <div id="video-grid"></div>
+        </div>
         <canvas id="game"></canvas>
         <div id="hud">
             <div class="hud-row">
-                <span class="hud-label">Room:</span>
-                <span class="hud-value" id="room-id">Loading...</span>
-            </div>
-            <div class="hud-row">
                 <span class="hud-label">Player:</span>
                 <span class="hud-value" id="player-id">Loading...</span>
+            </div>
+            <div class="hud-row">
+                <span class="hud-label">Players:</span>
+                <span class="hud-value" id="player-count">0</span>
             </div>
         </div>
         <div id="share">

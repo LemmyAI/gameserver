@@ -1,4 +1,4 @@
-.PHONY: run build test proto clean test-client test-server
+.PHONY: run build test proto clean test-client test-server webbridge fullstack
 
 # Default target - build and run server
 run: build
@@ -16,6 +16,17 @@ server:
 # Build only client
 client:
 	go build -o bin/client ./cmd/client
+
+# Build webbridge (with LiveKit support)
+webbridge:
+	go build -o bin/webbridge ./cmd/webbridge
+
+# Build everything
+all: build webbridge
+
+# Run full stack (LiveKit + WebBridge)
+fullstack: webbridge
+	./run.sh
 
 # Run tests
 test:
