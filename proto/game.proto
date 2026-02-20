@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package game;
+
+option go_package = "github.com/LemmyAI/gameserver/internal/protocol/gamepb";
+
+// ============================================
+// Connection & Handshake
+// ============================================
+
+// ClientHello is sent when a client first connects
+message ClientHello {
+  string player_id = 1;
+  string player_name = 2;
+  string version = 3;  // Client version for compatibility
+}
+
+// ServerWelcome is the server's response to ClientHello
+message ServerWelcome {
+  string player_id = 1;
+  uint32 tick_rate = 2;      // Server tick rate (e.g., 60)
+  uint64 server_time = 3;    // Server timestamp in ms
+}
+
+// ============================================
+// Player State
+// ============================================
+
+// Vec2 is a 2D vector for positions and velocities
+message Vec2 {
+  float x = 1;
+  float y = 2;
+}
+
+// PlayerInput represents input from a client
+message PlayerInput {
+  uint64 sequence = 1;       // Sequence number for ordering
+  uint64 timestamp = 2;      // Client timestamp
+  Vec2 movement = 3;         // Movement direction (-1 to 1)
+  bool jump = 4;
+  bool action_1 = 5;         // Generic action buttons
+  bool action_2 = 6;
+}
+
+// PlayerState is the server's view of a player
+message PlayerState {
+  string player_id = 1;
+  Vec2 position = 2;
+  Vec2 velocity = 3;
+  float rotation = 4;
+  uint64 timestamp = 5;
+}
+
+// ============================================
+// Game State
+// ============================================
+
+// GameStateSnapshot is the full game state (sent on join/reconnect)
+message GameStateSnapshot {
+  uint64 tick = 1;
+  uint64 timestamp = 2;
+  repeated PlayerState players = 3;
+  // Future: game objects, items, etc.
+}
+
+// GameStateDelta contains only changes since last tick
+message GameStateDelta {
+  uint64 tick = 1;
+  uint64 timestamp = 2;
+  repeated PlayerState changed_players = 3;
+  repeated string removed_players = 4;
+}
+
+// ============================================
+// Connection Management
+// ============================================
+
+// PlayerJoin broadcast when a player joins
+message PlayerJoin {
+  PlayerState player = 1;
+}
+
+// PlayerLeave broadcast when a player leaves
+message PlayerLeave {
+  string player_id = 1;
+  string reason = 2;
+}
+
+// ============================================
+// Wrapper Message
+// ============================================
+
+// Message is the top-level envelope for all messages
+message Message {
+  oneof payload {
+    // Connection
+    ClientHello client_hello = 1;
+    ServerWelcome server_welcome = 2;
+    
+    // Input
+    PlayerInput player_input = 10;
+    
+    // State
+    GameStateSnapshot state_snapshot = 20;
+    GameStateDelta state_delta = 21;
+    
+    // Events
+    PlayerJoin player_join = 30;
+    PlayerLeave player_leave = 31;
+  }
+}

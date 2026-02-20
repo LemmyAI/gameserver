@@ -1,26 +1,50 @@
-.PHONY: run build test proto clean
+.PHONY: run build test proto clean test-client test-server
 
-# Default target
+# Default target - build and run server
 run: build
 	./bin/server
 
-# Build the server
+# Build both server and client
 build:
 	go build -o bin/server ./cmd/server
+	go build -o bin/client ./cmd/client
+
+# Build only server
+server:
+	go build -o bin/server ./cmd/server
+
+# Build only client
+client:
+	go build -o bin/client ./cmd/client
 
 # Run tests
 test:
 	go test -v ./...
 
-# Generate protobuf (Phase 1+)
+# Generate protobuf code
 proto:
-	protoc --go_out=. --go_opt=paths=source_relative \
-		proto/game.proto
+	protoc --go_out=. --go_opt=module=github.com/LemmyAI/gameserver proto/game.proto
+
+# Test server (run in background)
+test-server: build
+	./bin/server &
+
+# Test client
+test-client: build
+	./bin/client
 
 # Clean build artifacts
 clean:
 	rm -rf bin/
 
-# Quick dev loop
+# Development loop
 dev: build
 	./bin/server
+
+# Install protoc dependencies (run once)
+install-tools:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+# Benchmarks
+bench:
+	go test -bench=. ./...
