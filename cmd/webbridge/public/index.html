@@ -1,199 +1,433 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>GameServer Test Client</title>
+    <title>GameServer - Multiplayer Test</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            background: #1a1a2e;
-            color: #eee;
-            font-family: 'Segoe UI', sans-serif;
+            background: #0a0a14;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', system-ui, sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
             padding: 20px;
         }
-        h1 { color: #00d9ff; margin-bottom: 10px; }
-        .status {
-            padding: 10px 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
+        h1 { 
+            color: #00d4ff; 
+            margin-bottom: 5px; 
+            font-weight: 600;
+            letter-spacing: 1px;
         }
-        .disconnected { background: #ff4757; }
-        .connected { background: #2ed573; }
+        .subtitle {
+            color: #666;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        .status-bar {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff4757;
+        }
+        .status-dot.connected { background: #2ed573; }
         #gameCanvas {
-            border: 2px solid #00d9ff;
-            border-radius: 8px;
-            background: #0f0f1a;
+            border: 2px solid #1a1a2e;
+            border-radius: 12px;
+            background: #050508;
         }
         .controls {
-            margin-top: 20px;
+            margin-top: 15px;
             display: flex;
-            gap: 10px;
+            gap: 8px;
         }
         .btn {
-            padding: 15px 25px;
-            font-size: 16px;
-            border: none;
+            padding: 12px 20px;
+            font-size: 14px;
+            border: 1px solid #2a2a3e;
             border-radius: 8px;
             cursor: pointer;
-            background: #4a4a6a;
-            color: white;
-            transition: all 0.2s;
+            background: #12121a;
+            color: #aaa;
+            transition: all 0.15s;
         }
-        .btn:hover { background: #00d9ff; color: #1a1a2e; }
-        .info { margin-top: 20px; color: #888; text-align: center; }
-        .players { margin-top: 10px; color: #00d9ff; }
+        .btn:hover { 
+            background: #1a1a28; 
+            border-color: #00d4ff;
+            color: #fff;
+        }
+        .btn:active {
+            background: #00d4ff;
+            color: #000;
+        }
+        .info { 
+            margin-top: 15px; 
+            color: #555; 
+            text-align: center;
+            font-size: 13px;
+        }
+        .stats {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #888;
+        }
+        .hud {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+        }
+        .hud-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+        }
+        .hud-label { color: #666; }
+        .hud-value { color: #00d4ff; font-family: monospace; }
     </style>
 </head>
 <body>
-    <h1>🎮 GameServer Test</h1>
-    <div id="status" class="status disconnected">Disconnected</div>
-    <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <h1>🎮 GameServer</h1>
+    <div class="subtitle">Real-time multiplayer test client</div>
+    
+    <div class="status-bar">
+        <div class="status-item">
+            <div id="statusDot" class="status-dot"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+        <div class="status-item">
+            <span>Player:</span>
+            <span id="playerName" style="color: #00d4ff;">---</span>
+        </div>
+        <div class="status-item">
+            <span>Players:</span>
+            <span id="playerCount" style="color: #2ed573;">0</span>
+        </div>
+    </div>
+    
+    <canvas id="gameCanvas" width="500" height="500"></canvas>
+    
     <div class="controls">
-        <button class="btn" onclick="setName()">Set Name</button>
-        <button class="btn" onclick="sendMove(-1, 0)">⬅️ Left</button>
-        <button class="btn" onclick="sendMove(1, 0)">➡️ Right</button>
-        <button class="btn" onclick="sendMove(0, -1)">⬆️ Up</button>
-        <button class="btn" onclick="sendMove(0, 1)">⬇️ Down</button>
+        <button class="btn" onclick="setName()">✏️ Set Name</button>
+        <button class="btn" onmousedown="startMove(-1,0)" onmouseup="stopMove()" ontouchstart="startMove(-1,0)" ontouchend="stopMove()">⬅️</button>
+        <button class="btn" onmousedown="startMove(1,0)" onmouseup="stopMove()" ontouchstart="startMove(1,0)" ontouchend="stopMove()">➡️</button>
+        <button class="btn" onmousedown="startMove(0,-1)" onmouseup="stopMove()" ontouchstart="startMove(0,-1)" ontouchend="stopMove()">⬆️</button>
+        <button class="btn" onmousedown="startMove(0,1)" onmouseup="stopMove()" ontouchstart="startMove(0,1)" ontouchend="stopMove()">⬇️</button>
     </div>
+    
     <div class="info">
-        <p>Use arrow keys or buttons to move</p>
-        <p>World: 1000x1000 | Player Speed: 100</p>
+        <p>WASD or Arrow keys to move • Click and hold buttons for continuous movement</p>
     </div>
-    <div id="players" class="players"></div>
+    
+    <div class="stats">
+        <div>FPS: <span id="fps">--</span></div>
+        <div>Ping: <span id="ping">--</span>ms</div>
+    </div>
+    
+    <div class="hud">
+        <div class="hud-row">
+            <span class="hud-label">Position:</span>
+            <span class="hud-value" id="posDisplay">(500, 500)</span>
+        </div>
+        <div class="hud-row">
+            <span class="hud-label">World:</span>
+            <span class="hud-value">1000 × 1000</span>
+        </div>
+    </div>
 
     <script>
+        // === CONFIG ===
+        const WORLD_W = 1000;
+        const WORLD_H = 1000;
+        const CANVAS_SIZE = 500;
+        const SCALE = CANVAS_SIZE / WORLD_W;
+        const PLAYER_RADIUS = 15;
+        const SEND_RATE = 20; // ms between input sends
+
+        // === STATE ===
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
-        const statusEl = document.getElementById('status');
-        const playersEl = document.getElementById('players');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const playerNameEl = document.getElementById('playerName');
+        const playerCountEl = document.getElementById('playerCount');
+        const fpsEl = document.getElementById('fps');
+        const pingEl = document.getElementById('ping');
+        const posDisplay = document.getElementById('posDisplay');
 
         let ws = null;
         let myId = null;
-        let playerName = 'Player' + Math.floor(Math.random() * 1000);
-        let players = {};
-        let myPos = { x: 500, y: 500 };
+        let myName = 'Player' + Math.floor(Math.random() * 1000);
+        
+        // Smooth state - interpolated positions
+        let serverState = {};      // Latest from server
+        let renderState = {};      // Interpolated for display
+        let myServerPos = { x: 500, y: 500 };
+        
+        // Input state
+        let currentInput = { dx: 0, dy: 0 };
+        let inputInterval = null;
+        
+        // Performance tracking
+        let lastFrameTime = performance.now();
+        let frameCount = 0;
+        let lastPingTime = 0;
+        let currentPing = 0;
 
-        // World settings
-        const WORLD_W = 1000, WORLD_H = 1000;
-        const SCALE = 0.4; // Scale world to canvas
-
+        // === NETWORKING ===
         function connect() {
-            ws = new WebSocket('ws://' + location.hostname + ':8081/ws');
-
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(proto + '//' + location.host + '/ws');
+            
             ws.onopen = () => {
-                statusEl.textContent = 'Connected';
-                statusEl.className = 'status connected';
-                console.log('WebSocket connected');
-                // Auto-join with random name
-                ws.send(JSON.stringify({ type: 'hello', name: playerName }));
+                statusDot.classList.add('connected');
+                statusText.textContent = 'Connected';
+                ws.send(JSON.stringify({ type: 'hello', name: myName }));
             };
-
+            
             ws.onclose = () => {
-                statusEl.textContent = 'Disconnected';
-                statusEl.className = 'status disconnected';
+                statusDot.classList.remove('connected');
+                statusText.textContent = 'Disconnected';
                 setTimeout(connect, 2000);
             };
-
-            ws.onerror = (err) => {
-                console.error('WebSocket error:', err);
+            
+            ws.onerror = (e) => console.error('WS error:', e);
+            
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                handleMessage(data);
             };
+        }
 
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                console.log('Received:', data);
-
-                if (data.type === 'connected') {
-                    myId = data.id || playerName;
-                }
-
-                // Handle game state
+        function handleMessage(data) {
+            if (data.type === 'welcome') {
+                myId = data.id;
+                playerNameEl.textContent = myName;
+                return;
+            }
+            
+            if (data.type === 'state') {
+                // Update server state
+                myId = data.yourId || myId;
+                
+                // Convert players array to object
+                const newPlayers = {};
                 if (data.players) {
-                    players = data.players;
-                    draw();
+                    for (const p of data.players) {
+                        newPlayers[p.id] = p;
+                    }
                 }
+                serverState = newPlayers;
+                playerCountEl.textContent = Object.keys(serverState).length;
+                
+                // Update my position
+                if (serverState[myId]) {
+                    myServerPos = {
+                        x: serverState[myId].x,
+                        y: serverState[myId].y
+                    };
+                    posDisplay.textContent = `(${Math.round(myServerPos.x)}, ${Math.round(myServerPos.y)})`;
+                }
+                return;
+            }
+        }
 
-                // Handle position update
-                if (data.x !== undefined) {
-                    myPos = { x: data.x, y: data.y };
-                    draw();
-                }
-            };
+        // === INPUT ===
+        function startMove(dx, dy) {
+            currentInput = { dx, dy };
+            sendInput();
+            // Continuous sending while held
+            if (!inputInterval) {
+                inputInterval = setInterval(sendInput, SEND_RATE);
+            }
+        }
+
+        function stopMove() {
+            currentInput = { dx: 0, dy: 0 };
+            if (inputInterval) {
+                clearInterval(inputInterval);
+                inputInterval = null;
+            }
+            sendInput(); // Send final stop
+        }
+
+        function sendInput() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'input',
+                    dx: currentInput.dx,
+                    dy: currentInput.dy
+                }));
+            }
         }
 
         function setName() {
-            const name = prompt('Enter your name:', playerName);
-            if (name) {
-                playerName = name;
+            const name = prompt('Enter your name:', myName);
+            if (name && name.trim()) {
+                myName = name.trim();
+                playerNameEl.textContent = myName;
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'hello', name: playerName }));
-                }
-            }
-        }
-
-        function sendMove(dx, dy) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'input', dx, dy }));
-            }
-        }
-
-        function draw() {
-            ctx.fillStyle = '#0f0f1a';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            // Draw grid
-            ctx.strokeStyle = '#2a2a4a';
-            ctx.lineWidth = 1;
-            for (let x = 0; x < WORLD_W; x += 100) {
-                ctx.beginPath();
-                ctx.moveTo(x * SCALE, 0);
-                ctx.lineTo(x * SCALE, canvas.height);
-                ctx.stroke();
-            }
-            for (let y = 0; y < WORLD_H; y += 100) {
-                ctx.beginPath();
-                ctx.moveTo(0, y * SCALE);
-                ctx.lineTo(canvas.width, y * SCALE);
-                ctx.stroke();
-            }
-
-            // Draw my position
-            ctx.fillStyle = '#00d9ff';
-            ctx.beginPath();
-            ctx.arc(myPos.x * SCALE, myPos.y * SCALE, 12, 0, Math.PI * 2);
-            ctx.fill();
-
-            // Draw name
-            ctx.fillStyle = '#fff';
-            ctx.font = '12px sans-serif';
-            ctx.fillText(playerName, myPos.x * SCALE - 20, myPos.y * SCALE + 25);
-
-            // Draw other players
-            ctx.fillStyle = '#ff6b6b';
-            for (const [id, p] of Object.entries(players)) {
-                if (id !== myId) {
-                    ctx.beginPath();
-                    ctx.arc(p.x * SCALE, p.y * SCALE, 10, 0, Math.PI * 2);
-                    ctx.fill();
+                    ws.send(JSON.stringify({ type: 'hello', name: myName }));
                 }
             }
         }
 
         // Keyboard controls
+        const keyState = {};
+        
         document.addEventListener('keydown', (e) => {
-            switch(e.key) {
-                case 'ArrowLeft': case 'a': sendMove(-1, 0); break;
-                case 'ArrowRight': case 'd': sendMove(1, 0); break;
-                case 'ArrowUp': case 'w': sendMove(0, -1); break;
-                case 'ArrowDown': case 's': sendMove(0, 1); break;
+            if (keyState[e.key]) return; // Already pressed
+            keyState[e.key] = true;
+            
+            switch(e.key.toLowerCase()) {
+                case 'arrowleft': case 'a':
+                    startMove(-1, 0); break;
+                case 'arrowright': case 'd':
+                    startMove(1, 0); break;
+                case 'arrowup': case 'w':
+                    startMove(0, -1); break;
+                case 'arrowdown': case 's':
+                    startMove(0, 1); break;
             }
         });
 
-        // Initial draw
-        draw();
+        document.addEventListener('keyup', (e) => {
+            keyState[e.key] = false;
+            
+            // Check if any movement key still pressed
+            const stillMoving =
+                keyState['arrowleft'] || keyState['a'] ||
+                keyState['arrowright'] || keyState['d'] ||
+                keyState['arrowup'] || keyState['w'] ||
+                keyState['arrowdown'] || keyState['s'];
+            
+            if (!stillMoving) {
+                stopMove();
+            }
+        });
+
+        // === RENDERING ===
+        function render() {
+            const now = performance.now();
+            
+            // FPS calculation
+            frameCount++;
+            if (now - lastFrameTime >= 1000) {
+                fpsEl.textContent = frameCount;
+                frameCount = 0;
+                lastFrameTime = now;
+            }
+            
+            // Clear canvas
+            ctx.fillStyle = '#050508';
+            ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            
+            // Draw grid
+            ctx.strokeStyle = '#101018';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 10; i++) {
+                const pos = i * 100 * SCALE;
+                ctx.beginPath();
+                ctx.moveTo(pos, 0);
+                ctx.lineTo(pos, CANVAS_SIZE);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, pos);
+                ctx.lineTo(CANVAS_SIZE, pos);
+                ctx.stroke();
+            }
+            
+            // Draw center crosshair
+            ctx.strokeStyle = '#1a1a2a';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(CANVAS_SIZE/2 - 20, CANVAS_SIZE/2);
+            ctx.lineTo(CANVAS_SIZE/2 + 20, CANVAS_SIZE/2);
+            ctx.moveTo(CANVAS_SIZE/2, CANVAS_SIZE/2 - 20);
+            ctx.lineTo(CANVAS_SIZE/2, CANVAS_SIZE/2 + 20);
+            ctx.stroke();
+            
+            // Draw players
+            for (const [id, player] of Object.entries(serverState)) {
+                const isMe = id === myId;
+                const x = player.x * SCALE;
+                const y = player.y * SCALE;
+                
+                // Player circle
+                ctx.beginPath();
+                ctx.arc(x, y, isMe ? PLAYER_RADIUS : PLAYER_RADIUS - 3, 0, Math.PI * 2);
+                
+                if (isMe) {
+                    // My player - cyan with glow
+                    ctx.shadowColor = '#00d4ff';
+                    ctx.shadowBlur = 15;
+                    ctx.fillStyle = '#00d4ff';
+                } else {
+                    // Other players - different colors based on ID hash
+                    const hue = hashId(id) % 360;
+                    ctx.shadowColor = `hsl(${hue}, 70%, 50%)`;
+                    ctx.shadowBlur = 8;
+                    ctx.fillStyle = `hsl(${hue}, 70%, 60%)`;
+                }
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                
+                // Name label
+                ctx.fillStyle = isMe ? '#fff' : '#888';
+                ctx.font = `${isMe ? 'bold ' : ''}11px system-ui`;
+                ctx.textAlign = 'center';
+                ctx.fillText(player.name || id.slice(0, 6), x, y + PLAYER_RADIUS + 14);
+            }
+            
+            // Draw "you are here" indicator if we have position
+            if (!serverState[myId] && myServerPos) {
+                const x = myServerPos.x * SCALE;
+                const y = myServerPos.y * SCALE;
+                ctx.beginPath();
+                ctx.arc(x, y, PLAYER_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = '#00d4ff';
+                ctx.shadowColor = '#00d4ff';
+                ctx.shadowBlur = 15;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+            
+            requestAnimationFrame(render);
+        }
+
+        function hashId(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash = hash & hash;
+            }
+            return Math.abs(hash);
+        }
+
+        // === INIT ===
         connect();
+        render();
     </script>
 </body>
 </html>
