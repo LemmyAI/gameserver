@@ -210,7 +210,6 @@ func (s *Server) handlePlayerInput(addr string, input *gamepb.PlayerInput) {
 	s.mu.RUnlock()
 
 	if !ok {
-		log.Printf("⚠️  [%s] input from unknown player", addr)
 		return
 	}
 
@@ -226,7 +225,4 @@ func (s *Server) handlePlayerInput(addr string, input *gamepb.PlayerInput) {
 		Action1: input.GetAction_1(),
 		Action2: input.GetAction_2(),
 	})
-
-	log.Printf("🎮 [%s:%s] seq=%d move=(%.2f,%.2f)",
-		addr, playerID, input.Sequence, input.Movement.GetX(), input.Movement.GetY())
 }

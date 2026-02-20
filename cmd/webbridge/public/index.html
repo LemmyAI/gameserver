@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GameServer Test Client</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            color: #eee;
+            font-family: 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 { color: #00d9ff; margin-bottom: 10px; }
+        .status {
+            padding: 10px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .disconnected { background: #ff4757; }
+        .connected { background: #2ed573; }
+        #gameCanvas {
+            border: 2px solid #00d9ff;
+            border-radius: 8px;
+            background: #0f0f1a;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+        .btn {
+            padding: 15px 25px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            background: #4a4a6a;
+            color: white;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: #00d9ff; color: #1a1a2e; }
+        .info { margin-top: 20px; color: #888; text-align: center; }
+        .players { margin-top: 10px; color: #00d9ff; }
+    </style>
+</head>
+<body>
+    <h1>🎮 GameServer Test</h1>
+    <div id="status" class="status disconnected">Disconnected</div>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <div class="controls">
+        <button class="btn" onclick="setName()">Set Name</button>
+        <button class="btn" onclick="sendMove(-1, 0)">⬅️ Left</button>
+        <button class="btn" onclick="sendMove(1, 0)">➡️ Right</button>
+        <button class="btn" onclick="sendMove(0, -1)">⬆️ Up</button>
+        <button class="btn" onclick="sendMove(0, 1)">⬇️ Down</button>
+    </div>
+    <div class="info">
+        <p>Use arrow keys or buttons to move</p>
+        <p>World: 1000x1000 | Player Speed: 100</p>
+    </div>
+    <div id="players" class="players"></div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusEl = document.getElementById('status');
+        const playersEl = document.getElementById('players');
+
+        let ws = null;
+        let myId = null;
+        let playerName = 'Player' + Math.floor(Math.random() * 1000);
+        let players = {};
+        let myPos = { x: 500, y: 500 };
+
+        // World settings
+        const WORLD_W = 1000, WORLD_H = 1000;
+        const SCALE = 0.4; // Scale world to canvas
+
+        function connect() {
+            ws = new WebSocket('ws://' + location.hostname + ':8081/ws');
+
+            ws.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                console.log('WebSocket connected');
+                // Auto-join with random name
+                ws.send(JSON.stringify({ type: 'hello', name: playerName }));
+            };
+
+            ws.onclose = () => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received:', data);
+
+                if (data.type === 'connected') {
+                    myId = data.id || playerName;
+                }
+
+                // Handle game state
+                if (data.players) {
+                    players = data.players;
+                    draw();
+                }
+
+                // Handle position update
+                if (data.x !== undefined) {
+                    myPos = { x: data.x, y: data.y };
+                    draw();
+                }
+            };
+        }
+
+        function setName() {
+            const name = prompt('Enter your name:', playerName);
+            if (name) {
+                playerName = name;
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'hello', name: playerName }));
+                }
+            }
+        }
+
+        function sendMove(dx, dy) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'input', dx, dy }));
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#0f0f1a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid
+            ctx.strokeStyle = '#2a2a4a';
+            ctx.lineWidth = 1;
+            for (let x = 0; x < WORLD_W; x += 100) {
+                ctx.beginPath();
+                ctx.moveTo(x * SCALE, 0);
+                ctx.lineTo(x * SCALE, canvas.height);
+                ctx.stroke();
+            }
+            for (let y = 0; y < WORLD_H; y += 100) {
+                ctx.beginPath();
+                ctx.moveTo(0, y * SCALE);
+                ctx.lineTo(canvas.width, y * SCALE);
+                ctx.stroke();
+            }
+
+            // Draw my position
+            ctx.fillStyle = '#00d9ff';
+            ctx.beginPath();
+            ctx.arc(myPos.x * SCALE, myPos.y * SCALE, 12, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw name
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px sans-serif';
+            ctx.fillText(playerName, myPos.x * SCALE - 20, myPos.y * SCALE + 25);
+
+            // Draw other players
+            ctx.fillStyle = '#ff6b6b';
+            for (const [id, p] of Object.entries(players)) {
+                if (id !== myId) {
+                    ctx.beginPath();
+                    ctx.arc(p.x * SCALE, p.y * SCALE, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        // Keyboard controls
+        document.addEventListener('keydown', (e) => {
+            switch(e.key) {
+                case 'ArrowLeft': case 'a': sendMove(-1, 0); break;
+                case 'ArrowRight': case 'd': sendMove(1, 0); break;
+                case 'ArrowUp': case 'w': sendMove(0, -1); break;
+                case 'ArrowDown': case 's': sendMove(0, 1); break;
+            }
+        });
+
+        // Initial draw
+        draw();
+        connect();
+    </script>
+</body>
+</html>
