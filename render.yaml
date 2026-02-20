@@ -1,12 +1,11 @@
 services:
   - type: web
     name: gameserver
-    env: docker
+    env: go
     plan: free
-    dockerfilePath: ./Dockerfile
+    buildCommand: go build -o gameserver ./cmd/server
+    startCommand: ./gameserver
     envVars:
       - key: PORT
-        value: 9000
-    # UDP is not supported on Render free tier web services
-    # This will run the UDP server but won't be accessible externally
-    # For testing, we can verify the server starts correctly
+        value: 10000
+    healthCheckPath: /health
