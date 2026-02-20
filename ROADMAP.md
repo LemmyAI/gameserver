@@ -106,73 +106,72 @@ Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
 
 ---
 
-## Phase 3: Matchmaking + Auth (Week 5-6)
+## Phase 3: Game Rooms & Shareable Links
 
-### Goal: Players can find matches and authenticate
+### Goal: Players can create a game room and share a link with friends
 
-### Day 21-23: Authentication
-- [ ] JWT token generation
-- [ ] `/auth/login` endpoint
-- [ ] `/auth/register` endpoint
-- [ ] Token validation middleware
+### Architecture
+```
+Create Game → Get unique room ID → Share link: localhost:8081/room/ABC123
+                                          ↓
+                            Friends join same room, play together
+```
 
-### Day 24-26: Matchmaking
-- [ ] Redis-backed match queue
-- [ ] `/match/queue` endpoint
-- [ ] `/match/status` endpoint
-- [ ] Simple skill-based pairing
+### Day 1-2: Room Management
+- [ ] Generate unique room IDs (short, shareable: ABC123 format)
+- [ ] Room lifecycle: create, join, leave, expire (empty for 5 min)
+- [ ] In-memory room registry (Redis later if needed)
+- [ ] Max players per room (configurable, default 8)
 
-### Day 27-28: Match Lifecycle
-- [ ] Create game room on match found
-- [ ] Assign UDP address to match
-- [ ] Create LiveKit voice room
-- [ ] Return connection details to players
+### Day 3-4: HTTP API
+- [ ] `POST /rooms` → create room, returns `{roomId, joinLink}`
+- [ ] `GET /rooms/{id}` → room info (player count, status)
+- [ ] `DELETE /rooms/{id}` → close room (host only)
 
-### Day 29-30: Integration
-- [ ] End-to-end match flow
-- [ ] Player joins → queues → matches → plays
-- [ ] Clean up on disconnect
+### Day 5-6: Webbridge Updates
+- [ ] URL routing: `/room/{roomId}` → join specific room
+- [ ] WebSocket joins correct room context
+- [ ] Room isolation (players only see others in same room)
+- [ ] Landing page: "Create Game" button → generates shareable link
+
+### Day 7-8: UI Polish
+- [ ] Room lobby screen (waiting for players)
+- [ ] "Share Link" button with clipboard copy
+- [ ] Player list in room
+- [ ] "Start Game" when ready
 
 ### Deliverable
 ```bash
-# Player flow:
-# 1. POST /auth/login → get token
-# 2. POST /match/queue → enter queue
-# 3. GET /match/status → waiting/matched
-# 4. Connect to UDP server address
-# 5. Play game
+# Player creates room:
+curl -X POST http://localhost:8081/rooms
+# → {"roomId": "ABC123", "link": "http://localhost:8081/room/ABC123"}
+
+# Share link with friends
+# Everyone opens the link → same game room → play together
 ```
 
 ---
 
-## Phase 4: Polish (Week 7-8)
+## Phase 4: Polish & Production
 
-### Goal: Production-ready foundation
+### Goal: Production-ready, deployable game server
 
-### Day 31-33: Reliable UDP
-- [ ] Implement `ReliableSender` with ACK/retry
-- [ ] Sequence numbers for important messages
-- [ ] Timeout handling
-
-### Day 34-35: Delta Compression
-- [x] Basic delta detection implemented in Phase 2
-- [ ] Bit-packing for smaller deltas
-- [ ] Quantized positions (int16 instead of float32)
-
-### Day 36-37: Reconnection
-- [ ] Session persistence in Redis
-- [ ] Grace period (30s) for reconnect
+### Day 9-11: Reliability
+- [ ] Graceful reconnection (30s grace period)
 - [ ] State sync on rejoin
-
-### Day 38-39: Input Validation
-- [ ] Speed/teleport detection
+- [ ] Input validation (speed hack detection)
 - [ ] Rate limiting per player
-- [ ] Log suspicious activity
 
-### Day 40: Final Testing
-- [ ] Load test with 100+ concurrent players
-- [ ] Network simulation (packet loss, latency)
-- [ ] Document API
+### Day 12-13: Optimization
+- [ ] Delta compression (bit-packing, quantized positions)
+- [ ] Bandwidth monitoring
+- [ ] Connection quality indicators
+
+### Day 14-15: Deployment
+- [ ] Docker compose for server + webbridge
+- [ ] Environment config (PORT, ROOM_TTL, MAX_PLAYERS)
+- [ ] Health check endpoints
+- [ ] Deploy to Render.com or similar
 
 ---
 
@@ -181,9 +180,10 @@ Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
 | Milestone | Status |
 |-----------|--------|
 | Phase 1 | ✅ UDP echo working |
-| Phase 2 | ✅ 2 players can move, state sync at 60Hz |
-| Phase 3 | ⏳ Pending |
-| Phase 4 | ⏳ Pending |
+| Phase 2 | ✅ Multiplayer state sync at 60Hz |
+| Phase 2.5 | ✅ Browser canvas client with real-time multiplayer |
+| Phase 3 | ⏳ Game rooms & shareable links |
+| Phase 4 | ⏳ Polish & production deployment |
 
 ## Benchmarks
 
@@ -198,11 +198,11 @@ BenchmarkApplyInput-6       101.7 ns/op     0 B/op    0 allocs/op
 ```go
 // go.mod
 require (
-    github.com/gofiber/fiber/v3 v3.0.0  // Not yet used
-    github.com/livekit/server-sdk-go/v2 v2.0.0  // Not yet used
-    github.com/redis/go-redis/v9 v9.3.0  // Not yet used
-    github.com/jackc/pgx/v5 v5.5.0  // Not yet used
+    github.com/google/uuid v1.6.0  ✅ (room IDs, player IDs)
     google.golang.org/protobuf v1.36.0  ✅
-    github.com/google/uuid v1.6.0  ✅
+    github.com/gorilla/websocket v1.5.3  ✅ (webbridge)
+    
+    // Future (not needed yet):
+    // github.com/redis/go-redis/v9  (if room persistence needed)
 )
 ```
