@@ -159,10 +159,11 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 		return
 	}
 
-	log.Printf("📷 Created local %s track from %s", track.Kind(), fromPlayerID)
+	log.Printf("📷 Created local %s track from %s (codec: %s)", track.Kind(), fromPlayerID, codec.MimeType)
 
 	// Add this track to all OTHER players' connections
 	m.mu.RLock()
+	otherPlayers := 0
 	for playerID, pc := range m.peerConns {
 		if playerID == fromPlayerID {
 			continue // Don't send to self
@@ -173,26 +174,34 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 			log.Printf("❌ Failed to add track to %s: %v", playerID, err)
 			continue
 		}
+		otherPlayers++
 		log.Printf("✅ Added %s track from %s to %s", track.Kind(), fromPlayerID, playerID)
-		
-		// Trigger renegotiation for this player
-		go m.renegotiatePlayer(playerID)
 	}
 	m.mu.RUnlock()
 
+	if otherPlayers == 0 {
+		log.Printf("⚠️ No other players to forward to yet - track stored for future joins")
+	}
+
 	// Read RTP packets from incoming track and forward to local track
 	rtpBuf := make([]byte, 1500)
+	packetsForwarded := 0
 	for {
-		_, _, err := track.Read(rtpBuf)
+		n, _, err := track.Read(rtpBuf)
 		if err != nil {
 			log.Printf("📭 [%s] Track read ended: %v", fromPlayerID, err)
 			return
 		}
 
 		// Forward to local track (which sends to all subscribed players)
-		if _, err := localTrack.Write(rtpBuf); err != nil {
+		if _, err := localTrack.Write(rtpBuf[:n]); err != nil {
 			log.Printf("❌ Failed to write RTP: %v", err)
 			return
+		}
+		
+		packetsForwarded++
+		if packetsForwarded % 100 == 0 {
+			log.Printf("📤 [%s] Forwarded %d %s packets", fromPlayerID, packetsForwarded, track.Kind())
 		}
 	}
 }
@@ -243,16 +252,26 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 
 	// Add existing tracks from other players to this new player
 	m.mu.RLock()
+	audioCount := len(m.audioTracks)
+	videoCount := len(m.videoTracks)
+	log.Printf("🎥 [%s] Existing tracks: %d audio, %d video", playerID, audioCount, videoCount)
+	
 	for otherPlayerID, audioTrack := range m.audioTracks {
 		if otherPlayerID != playerID {
-			pc.AddTrack(audioTrack)
-			log.Printf("🎵 Added existing audio from %s to new player %s", otherPlayerID, playerID)
+			if _, err := pc.AddTrack(audioTrack); err != nil {
+				log.Printf("❌ Failed to add audio from %s to %s: %v", otherPlayerID, playerID, err)
+			} else {
+				log.Printf("🎵 Added audio from %s to new player %s", otherPlayerID, playerID)
+			}
 		}
 	}
 	for otherPlayerID, videoTrack := range m.videoTracks {
 		if otherPlayerID != playerID {
-			pc.AddTrack(videoTrack)
-			log.Printf("📹 Added existing video from %s to new player %s", otherPlayerID, playerID)
+			if _, err := pc.AddTrack(videoTrack); err != nil {
+				log.Printf("❌ Failed to add video from %s to %s: %v", otherPlayerID, playerID, err)
+			} else {
+				log.Printf("📹 Added video from %s to new player %s", otherPlayerID, playerID)
+			}
 		}
 	}
 	m.mu.RUnlock()
@@ -260,6 +279,7 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
+		log.Printf("❌ Failed to create answer: %v", err)
 		return nil, err
 	}
 
@@ -268,6 +288,7 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		return nil, err
 	}
 
+	log.Printf("✅ [%s] Created answer with %d senders", playerID, len(pc.GetSenders()))
 	return &answer, nil
 }
 
