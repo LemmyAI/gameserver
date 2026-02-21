@@ -180,21 +180,18 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 		m.videoTracks[fromPlayerID] = localTrack
 	}
 	
-	// Add track to all OTHER players using AddTransceiverFromTrack with Sendonly direction
-	// This prevents reusing existing recvonly transceivers and avoids loopback
+	// Add track to all OTHER players
+	// AddTrack will reuse existing recvonly transceivers if available
 	var toRenegotiate []string
 	for playerID, pc := range m.peerConns {
 		log.Printf("🎥 [FORWARD] Checking player %s (from: %s), skip: %v", playerID, fromPlayerID, playerID == fromPlayerID)
 		if playerID != fromPlayerID {
-			// Use AddTransceiverFromTrack with Sendonly to create a fresh sendonly transceiver
-			transceiver, err := pc.AddTransceiverFromTrack(localTrack, webrtc.RTPTransceiverInit{
-				Direction: webrtc.RTPTransceiverDirectionSendonly,
-			})
+			sender, err := pc.AddTrack(localTrack)
 			if err != nil {
-				log.Printf("❌ [FORWARD] Failed to add transceiver to %s: %v", playerID, err)
+				log.Printf("❌ [FORWARD] Failed to add track to %s: %v", playerID, err)
 			} else {
-				log.Printf("✅ [FORWARD] Added %s transceiver (sendonly) from %s to %s, mid: %s", 
-					track.Kind(), fromPlayerID, playerID, transceiver.Mid())
+				log.Printf("✅ [FORWARD] Added %s track from %s to %s, sender has track: %v", 
+					track.Kind(), fromPlayerID, playerID, sender.Track() != nil)
 				toRenegotiate = append(toRenegotiate, playerID)
 			}
 		}
@@ -333,27 +330,35 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 	
 	for otherPlayerID, audioTrack := range m.audioTracks {
 		if otherPlayerID != playerID {
-			// Use AddTransceiverFromTrack with Sendonly to create a fresh sendonly transceiver
-			transceiver, err := pc.AddTransceiverFromTrack(audioTrack, webrtc.RTPTransceiverInit{
-				Direction: webrtc.RTPTransceiverDirectionSendonly,
-			})
+			// Log existing transceivers before adding
+			log.Printf("🎥 [%s] Before AddTrack(audio): %d transceivers", playerID, len(pc.GetTransceivers()))
+			for i, t := range pc.GetTransceivers() {
+				log.Printf("🎥 [%s] Transceiver %d: direction=%v, kind=%v", 
+					playerID, i, t.Direction(), t.Receiver().Track().Kind())
+			}
+			
+			sender, err := pc.AddTrack(audioTrack)
 			if err != nil {
-				log.Printf("❌ Failed to add audio transceiver from %s to %s: %v", otherPlayerID, playerID, err)
+				log.Printf("❌ Failed to add audio from %s to %s: %v", otherPlayerID, playerID, err)
 			} else {
-				log.Printf("🎵 Added audio transceiver (sendonly) from %s to %s, mid: %s", otherPlayerID, playerID, transceiver.Mid())
+				log.Printf("🎵 Added audio from %s to %s, sender track: %v", otherPlayerID, playerID, sender.Track() != nil)
 			}
 		}
 	}
 	for otherPlayerID, videoTrack := range m.videoTracks {
 		if otherPlayerID != playerID {
-			// Use AddTransceiverFromTrack with Sendonly to create a fresh sendonly transceiver
-			transceiver, err := pc.AddTransceiverFromTrack(videoTrack, webrtc.RTPTransceiverInit{
-				Direction: webrtc.RTPTransceiverDirectionSendonly,
-			})
+			// Log existing transceivers before adding
+			log.Printf("🎥 [%s] Before AddTrack(video): %d transceivers", playerID, len(pc.GetTransceivers()))
+			for i, t := range pc.GetTransceivers() {
+				log.Printf("🎥 [%s] Transceiver %d: direction=%v, kind=%v", 
+					playerID, i, t.Direction(), t.Receiver().Track().Kind())
+			}
+			
+			sender, err := pc.AddTrack(videoTrack)
 			if err != nil {
-				log.Printf("❌ Failed to add video transceiver from %s to %s: %v", otherPlayerID, playerID, err)
+				log.Printf("❌ Failed to add video from %s to %s: %v", otherPlayerID, playerID, err)
 			} else {
-				log.Printf("📹 Added video transceiver (sendonly) from %s to %s, mid: %s", otherPlayerID, playerID, transceiver.Mid())
+				log.Printf("📹 Added video from %s to %s, sender track: %v", otherPlayerID, playerID, sender.Track() != nil)
 			}
 		}
 	}
