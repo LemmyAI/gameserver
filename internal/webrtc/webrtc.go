@@ -240,19 +240,32 @@ func (m *Manager) CreateOffer(playerID string) (*webrtc.SessionDescription, erro
 	m.mu.RUnlock()
 
 	if !exists {
+		log.Printf("❌ [CreateOffer] No peer connection for %s", playerID)
 		return nil, nil
+	}
+
+	// Log what we have before creating offer
+	log.Printf("📤 [%s] CreateOffer: senders=%d, transceivers=%d", playerID, len(pc.GetSenders()), len(pc.GetTransceivers()))
+	for i, s := range pc.GetSenders() {
+		if s.Track() != nil {
+			log.Printf("📤 [%s] Sender %d: track=%s", playerID, i, s.Track().Kind())
+		} else {
+			log.Printf("📤 [%s] Sender %d: no track", playerID, i)
+		}
 	}
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
+		log.Printf("❌ [CreateOffer] Failed for %s: %v", playerID, err)
 		return nil, err
 	}
 
 	if err := pc.SetLocalDescription(offer); err != nil {
+		log.Printf("❌ [CreateOffer] SetLocalDescription failed for %s: %v", playerID, err)
 		return nil, err
 	}
 
-	log.Printf("📤 [%s] Created renegotiation offer", playerID)
+	log.Printf("📤 [%s] Created renegotiation offer, SDP length=%d", playerID, len(offer.SDP))
 	return &offer, nil
 }
 
@@ -334,32 +347,21 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 	log.Printf("🎥 [%s] Transceivers after adding tracks:", playerID)
 	for i, t := range pc.GetTransceivers() {
 		sender := t.Sender()
-		hasTrack := sender != nil && sender.Track() != nil
-		log.Printf("🎥 [%s] Transceiver %d: direction=%v, hasTrack=%v", playerID, i, t.Direction(), hasTrack)
-	}
-	
-	// CRITICAL: For any transceiver where we don't have a track to send,
-	// stop it to prevent sending empty/black video.
-	// Pion auto-creates senders for recvonly offers, we need to remove them.
-	stoppedCount := 0
-	for _, t := range pc.GetTransceivers() {
-		sender := t.Sender()
-		hasTrack := sender != nil && sender.Track() != nil
-		direction := t.Direction()
-		
-		// If this is a sending transceiver but we have no track, stop it
-		if (direction == webrtc.RTPTransceiverDirectionSendrecv || direction == webrtc.RTPTransceiverDirectionSendonly) && !hasTrack {
-			kind := "unknown"
-			if t.Receiver() != nil && t.Receiver().Track() != nil {
-				kind = string(t.Receiver().Track().Kind())
-			}
-			log.Printf("🛑 [%s] Stopping transceiver (was %v, no track, kind: %s)", playerID, direction, kind)
-			_ = t.Stop()
-			stoppedCount++
+		receiver := t.Receiver()
+		hasSenderTrack := sender != nil && sender.Track() != nil
+		var recvKind string
+		if receiver != nil && receiver.Track() != nil {
+			recvKind = string(receiver.Track().Kind())
 		}
+		log.Printf("🎥 [%s] Transceiver %d: direction=%v, hasSenderTrack=%v, recvKind=%s", 
+			playerID, i, t.Direction(), hasSenderTrack, recvKind)
 	}
 	
-	log.Printf("🎥 [%s] Stopped %d transceivers without tracks", playerID, stoppedCount)
+	// DON'T stop transceivers anymore - it prevents renegotiation later!
+	// The client's recvonly transceivers will be upgraded when we add tracks
+	// Stopped transceivers become inactive and can't be used for sending
+	
+	log.Printf("🎥 [%s] Not stopping any transceivers (keeping for potential renegotiation)", playerID)
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
