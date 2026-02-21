@@ -151,13 +151,21 @@ async function connectWebRTC() {
             showToast('No camera/mic - you can still see and hear others!');
         }
 
-        // Add transceivers for receiving remote tracks (CRITICAL!)
-        // This tells the server we want to receive audio/video from others
+        // Add transceivers FIRST for receiving remote tracks
+        // This ensures we have recvonly transceivers before adding local tracks
+        console.log('🎥 Adding recvonly transceivers...');
         peerConnection.addTransceiver('audio', { direction: 'recvonly' });
         peerConnection.addTransceiver('video', { direction: 'recvonly' });
 
+        // Log transceivers after adding
+        console.log('🎥 Transceivers:', peerConnection.getTransceivers().map(t => ({
+            kind: t.receiver.track?.kind,
+            direction: t.direction
+        })));
+
         // Create offer
         const offer = await peerConnection.createOffer();
+        console.log('🎥 Offer SDP includes:', offer.sdp.includes('m=audio'), offer.sdp.includes('m=video'));
         await peerConnection.setLocalDescription(offer);
         
         console.log('📤 Sending WebRTC offer');
@@ -244,12 +252,25 @@ async function handleWebRTCAnswer(data) {
     }
     
     console.log('📥 Received WebRTC answer');
+    console.log('📥 Answer SDP lines:', data.sdp.split('\n').length);
+    console.log('📥 Answer has audio:', data.sdp.includes('m=audio'));
+    console.log('📥 Answer has video:', data.sdp.includes('m=video'));
+    
+    // Check for SendOnly in answer (server sending to us)
+    console.log('📥 SendOnly lines:', (data.sdp.match(/a=sendonly/g) || []).length);
+    console.log('📥 SendRecv lines:', (data.sdp.match(/a=sendrecv/g) || []).length);
+    
     try {
         await peerConnection.setRemoteDescription({
             type: 'answer',
             sdp: data.sdp
         });
         console.log('✅ Remote description set');
+        console.log('🎥 Transceivers after answer:', peerConnection.getTransceivers().map(t => ({
+            kind: t.receiver.track?.kind,
+            direction: t.direction,
+            currentDirection: t.currentDirection
+        })));
     } catch (err) {
         console.error('Failed to set remote description:', err);
     }
