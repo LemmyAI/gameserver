@@ -9,6 +9,15 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// Helper to get map keys for logging
+func getKeys(m map[string]*webrtc.PeerConnection) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // RenegotiateEvent is sent when a new track needs to be sent to existing players
 type RenegotiateEvent struct {
 	PlayerID string
@@ -143,6 +152,8 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackRemote) {
 	codec := track.Codec()
 	
+	log.Printf("🎥 [FORWARD] Starting forward for %s track from %s", track.Kind(), fromPlayerID)
+	
 	capability := webrtc.RTPCodecCapability{
 		MimeType:  codec.MimeType,
 		ClockRate: codec.ClockRate,
@@ -160,6 +171,8 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 	}
 
 	m.mu.Lock()
+	log.Printf("🎥 [FORWARD] %s - peerConns: %v, storing track", fromPlayerID, getKeys(m.peerConns))
+	
 	if track.Kind() == webrtc.RTPCodecTypeAudio {
 		m.audioTracks[fromPlayerID] = localTrack
 	} else {
@@ -169,6 +182,7 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 	// Add track to all OTHER players and prepare renegotiation
 	var toRenegotiate []string
 	for playerID, pc := range m.peerConns {
+		log.Printf("🎥 [FORWARD] Checking player %s (from: %s), skip: %v", playerID, fromPlayerID, playerID == fromPlayerID)
 		if playerID != fromPlayerID {
 			if _, err := pc.AddTrack(localTrack); err != nil {
 				log.Printf("❌ [FORWARD] Failed to add track to %s: %v", playerID, err)
@@ -258,6 +272,7 @@ func (m *Manager) RemovePeerConnection(playerID string) {
 
 // HandleOffer handles an SDP offer from a client
 func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescription, error) {
+	// Create peer connection first
 	pc, err := m.CreatePeerConnection(playerID)
 	if err != nil {
 		return nil, err
@@ -267,14 +282,36 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		Type: webrtc.SDPTypeOffer,
 		SDP:  sdp,
 	}
+	
+	// Set remote description - this triggers OnTrack callbacks
+	// But the playerID is now in peerConns, so forwardTrackToOthers will skip them
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		return nil, err
 	}
+	
+	log.Printf("🎥 [%s] After SetRemoteDescription, checking existing tracks...", playerID)
 
-	// Add existing tracks from other players
+	// Add existing tracks from other players (NOT including this player's own tracks)
 	m.mu.RLock()
 	log.Printf("🎥 [%s] HandleOffer: %d players in room, %d audio tracks, %d video tracks", 
 		playerID, len(m.peerConns), len(m.audioTracks), len(m.videoTracks))
+	
+	// Log which tracks we're considering
+	for otherPlayerID := range m.audioTracks {
+		if otherPlayerID == playerID {
+			log.Printf("⚠️ [%s] SKIP own audio track (this would be loopback!)", playerID)
+		} else {
+			log.Printf("➕ [%s] Will add audio from %s", playerID, otherPlayerID)
+		}
+	}
+	for otherPlayerID := range m.videoTracks {
+		if otherPlayerID == playerID {
+			log.Printf("⚠️ [%s] SKIP own video track (this would be loopback!)", playerID)
+		} else {
+			log.Printf("➕ [%s] Will add video from %s", playerID, otherPlayerID)
+		}
+	}
+	
 	for otherPlayerID, audioTrack := range m.audioTracks {
 		if otherPlayerID != playerID {
 			if _, err := pc.AddTrack(audioTrack); err != nil {
