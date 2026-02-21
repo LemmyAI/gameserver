@@ -1,11 +1,17 @@
 services:
   - type: web
-    name: gameserver
-    env: go
-    plan: free
-    buildCommand: go build -o gameserver ./cmd/server
-    startCommand: ./gameserver
+    name: gameserver-webbridge
+    env: docker
+    plan: starter  # $7/month, more resources
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: PORT
-        value: 10000
-    healthCheckPath: /health
+        value: 8080
+      - key: LIVEKIT_URL
+        value: wss://your-livekit-instance.render.com  # Or LiveKit Cloud URL
+      - key: LIVEKIT_API_KEY
+        sync: false  # Set manually in dashboard
+      - key: LIVEKIT_API_SECRET
+        sync: false  # Set manually in dashboard
+    healthCheckPath: /status

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -312,11 +313,18 @@ func (b *Bridge) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 
 	rm.Join(host, "Host")
 
+	// Build join link from request host
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	joinLink := fmt.Sprintf("%s://%s/room/%s", scheme, r.Host, rm.ID)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(CreateRoomResponse{
 		RoomID:    rm.ID,
-		JoinLink:  fmt.Sprintf("http://localhost:8081/room/%s", rm.ID),
+		JoinLink:  joinLink,
 		CreatedAt: rm.CreatedAt.Unix(),
 		HostID:    host,
 	})
@@ -428,9 +436,12 @@ func (b *Bridge) handleLiveKitToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("🎥 LiveKit token request: room=%s player=%s", req.RoomID, req.PlayerID)
+
 	// Verify room exists
 	rm := b.rooms.Get(req.RoomID)
 	if rm == nil {
+		log.Printf("🎥 Room not found: %s", req.RoomID)
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "room not found"})
 		return
@@ -445,22 +456,119 @@ func (b *Bridge) handleLiveKitToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Return proxy URL instead of direct LiveKit URL
+	scheme := "ws"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "wss"
+	}
+	proxyURL := fmt.Sprintf("%s://%s/livekit/ws", scheme, r.Host)
+
+	log.Printf("🎥 Returning LiveKit URL: %s", proxyURL)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(LiveKitTokenResponse{
 		Token:    token,
 		RoomID:   req.RoomID,
 		PlayerID: req.PlayerID,
-		URL:      livekitURL,
+		URL:      proxyURL,
 	})
 }
 
 func (b *Bridge) handleLiveKitConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Return the proxy URL instead of direct LiveKit URL
+	// Browser will connect to /livekit/ws which we proxy to LiveKit
+	scheme := "ws"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "wss"
+	}
+	proxyURL := fmt.Sprintf("%s://%s/livekit/ws", scheme, r.Host)
 	json.NewEncoder(w).Encode(map[string]string{
-		"url": livekitURL,
+		"url": proxyURL,
 	})
+}
+
+// handleLiveKitWS proxies WebSocket connections to LiveKit server
+func (b *Bridge) handleLiveKitWS(w http.ResponseWriter, r *http.Request) {
+	// Parse the LiveKit URL
+	targetURL, err := url.Parse(livekitURL)
+	if err != nil {
+		log.Printf("Failed to parse LiveKit URL: %v", err)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+
+	// Create connection to LiveKit
+	targetAddr := targetURL.Host
+	if targetURL.Scheme == "wss" {
+		targetAddr = targetURL.Host
+	}
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	// Build target URL with query params
+	targetWSURL := fmt.Sprintf("ws://%s%s", targetAddr, r.URL.Path)
+	if r.URL.RawQuery != "" {
+		targetWSURL += "?" + r.URL.RawQuery
+	}
+
+	log.Printf("🔀 Proxying LiveKit WS: %s -> %s", r.URL.String(), targetWSURL)
+
+	// Connect to LiveKit
+	targetConn, _, err := dialer.Dial(targetWSURL, nil)
+	if err != nil {
+		log.Printf("Failed to connect to LiveKit: %v", err)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+	defer targetConn.Close()
+
+	// Upgrade client connection
+	clientConn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade client WS: %v", err)
+		return
+	}
+	defer clientConn.Close()
+
+	// Bidirectional copy
+	done := make(chan struct{}, 2)
+
+	// Client -> LiveKit
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			msgType, msg, err := clientConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := targetConn.WriteMessage(msgType, msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	// LiveKit -> Client
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			msgType, msg, err := targetConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := clientConn.WriteMessage(msgType, msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait for either direction to finish
+	<-done
 }
 
 // ================== WebSocket ==================
@@ -636,10 +744,6 @@ func (b *Bridge) handleRoomPage(w http.ResponseWriter, r *http.Request) {
 func main() {
 	bridge := NewBridge()
 
-	log.Println("🌐 Web Bridge: http://localhost:8081")
-	log.Println("📡 Game servers will be spawned per-room starting at port 9100")
-	log.Printf("🎥 LiveKit URL: %s\n", livekitURL)
-
 	fs := http.FileServer(http.Dir("./cmd/webbridge/public"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 	http.HandleFunc("/rooms", bridge.handleCreateRoom)
@@ -648,10 +752,41 @@ func main() {
 	http.HandleFunc("/status", bridge.handleStatus)
 	http.HandleFunc("/livekit/token", bridge.handleLiveKitToken)
 	http.HandleFunc("/livekit/config", bridge.handleLiveKitConfig)
+	http.HandleFunc("/livekit/ws", bridge.handleLiveKitWS) // WebSocket proxy to LiveKit
 	http.HandleFunc("/", bridge.handleLanding)
 	http.HandleFunc("/room/", bridge.handleRoomPage)
 
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	// Get port from environment (Render sets PORT)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8081"
+	}
+
+	// Check for HTTPS certs (local dev)
+	certFile := "certs/localhost+2.pem"
+	keyFile := "certs/localhost+2-key.pem"
+	
+	_, certErr := os.Stat(certFile)
+	_, keyErr := os.Stat(keyFile)
+	
+	// Check if we're behind a proxy (Render provides HTTPS)
+	_, isRender := os.LookupEnv("RENDER")
+	
+	if isRender || (certErr != nil || keyErr != nil) {
+		// HTTP only (Render handles HTTPS termination, or local dev without certs)
+		log.Printf("🌐 Web Bridge: http://localhost:%s", port)
+		log.Println("📡 Game servers will be spawned per-room starting at port 9100")
+		log.Printf("🎥 LiveKit URL: %s\n", livekitURL)
+		log.Fatal(http.ListenAndServe(":"+port, nil))
+	} else {
+		// HTTPS available (local dev with mkcert)
+		log.Println("🔐 HTTPS enabled")
+		log.Println("🌐 Web Bridge: https://localhost:8443")
+		log.Println("🌐 Also: https://192.168.0.39:8443")
+		log.Println("📡 Game servers will be spawned per-room starting at port 9100")
+		log.Printf("🎥 LiveKit URL: %s\n", livekitURL)
+		log.Fatal(http.ListenAndServeTLS(":8443", certFile, keyFile, nil))
+	}
 }
 
 func (b *Bridge) handleRoomRoutes(w http.ResponseWriter, r *http.Request) {

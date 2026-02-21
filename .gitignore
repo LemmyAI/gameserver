@@ -1,0 +1,7 @@
+
+# Local dev
+bin/
+certs/
+*.pem
+*.key
+

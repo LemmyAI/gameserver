@@ -5,6 +5,8 @@ const pathParts = window.location.pathname.split('/');
 const ROOM_ID = pathParts[2] || null;
 const PLAYER_NAME = 'Player' + Math.floor(Math.random() * 1000);
 
+console.log('🎮 Room ID:', ROOM_ID, 'Player name:', PLAYER_NAME);
+
 // WebSocket connection
 let ws = null;
 let myId = null;
@@ -12,10 +14,16 @@ let players = {};
 let myPlayer = { x: 500, y: 500, vx: 0, vy: 0 };
 let keys = { up: false, down: false, left: false, right: false };
 
+// Dynamic host detection
+const HOST = window.location.host;
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const HTTP_PROTOCOL = window.location.protocol;
+
 // LiveKit
 let room = null;
 let micEnabled = true;
 let camEnabled = true;
+let livekitConnected = false;
 
 // Canvas setup
 const canvas = document.getElementById('game');
@@ -31,10 +39,20 @@ window.addEventListener('resize', resizeCanvas);
 // ================== LiveKit ==================
 
 async function connectLiveKit() {
+    console.log('🎥 connectLiveKit called - ROOM_ID:', ROOM_ID, 'myId:', myId, 'connected:', livekitConnected);
+
     if (!ROOM_ID || !myId) {
-        console.log('No room or player ID yet, skipping LiveKit');
+        console.log('⚠️ No room or player ID yet, skipping LiveKit');
         return;
     }
+
+    if (livekitConnected) {
+        console.log('🎥 LiveKit already connected');
+        return;
+    }
+
+    livekitConnected = true;
+    console.log('🎥 Starting LiveKit connection...');
 
     try {
         // Get token from server
@@ -94,10 +112,12 @@ async function connectLiveKit() {
         // Publish local tracks
         await publishLocalTracks();
 
-        // Add existing participants
-        room.participants.forEach((participant) => {
-            addVideoTrack(participant);
-        });
+        // Add existing participants (if any)
+        if (room.participants) {
+            room.participants.forEach((participant) => {
+                addVideoTrack(participant);
+            });
+        }
 
         // Add self to video grid
         addSelfToGrid();
@@ -110,25 +130,26 @@ async function connectLiveKit() {
 
 async function publishLocalTracks() {
     try {
-        // Publish microphone
-        const audioTrack = await LivekitClient.createLocalAudioTrack();
-        await room.localParticipant.publishTrack(audioTrack);
-        console.log('🎤 Published audio track');
-
-        // Publish camera
-        const videoTrack = await LivekitClient.createLocalVideoTrack();
-        await room.localParticipant.publishTrack(videoTrack);
-        console.log('📷 Published video track');
-
-    } catch (err) {
-        console.error('Failed to publish tracks:', err);
-        // Try just audio if video fails
+        // Publish microphone first
         try {
             const audioTrack = await LivekitClient.createLocalAudioTrack();
             await room.localParticipant.publishTrack(audioTrack);
-        } catch (e) {
-            console.error('Audio also failed:', e);
+            console.log('🎤 Published audio track');
+        } catch (audioErr) {
+            console.warn('Microphone not available:', audioErr.message);
         }
+
+        // Publish camera (may fail if no camera)
+        try {
+            const videoTrack = await LivekitClient.createLocalVideoTrack();
+            await room.localParticipant.publishTrack(videoTrack);
+            console.log('📷 Published video track');
+        } catch (videoErr) {
+            console.warn('Camera not available:', videoErr.message);
+        }
+
+    } catch (err) {
+        console.error('Failed to publish tracks:', err);
     }
 }
 
@@ -263,8 +284,8 @@ async function toggleCam() {
 // ================== WebSocket ==================
 
 function connect() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    ws = new WebSocket(`${WS_PROTOCOL}//${HOST}/ws`);
+    console.log('🔌 Connecting to:', `${WS_PROTOCOL}//${HOST}/ws`);
 
     ws.onopen = () => {
         console.log('🔌 Connected to server');
@@ -302,11 +323,13 @@ function connect() {
 
 // Handle incoming messages
 function handleMessage(data) {
+    console.log('📨 Received:', data.type, data);
     switch (data.type) {
         case 'welcome':
-            myId = data.yourId;
+            myId = data.id;  // Server sends "id" not "yourId"
             document.getElementById('player-id').textContent = myId;
             document.getElementById('share-link').value = window.location.href;
+            console.log('✅ Got player ID from welcome:', myId);
             // Connect to LiveKit after getting player ID
             connectLiveKit();
             break;
@@ -317,6 +340,9 @@ function handleMessage(data) {
             if (data.isHost) {
                 showToast('You are the host! Share the link to invite friends.');
             }
+            console.log('✅ Joined room:', data.roomId, 'myId:', myId);
+            // Also try to connect to LiveKit
+            connectLiveKit();
             break;
 
         case 'player_joined':
@@ -329,6 +355,13 @@ function handleMessage(data) {
             break;
 
         case 'state':
+            // Set player ID from state if we don't have it yet
+            if (!myId && data.yourId) {
+                myId = data.yourId;
+                document.getElementById('player-id').textContent = myId;
+                console.log('✅ Got player ID from state:', myId);
+                connectLiveKit();
+            }
             // Update players from game server
             data.players.forEach(p => {
                 if (p.id === myId) {

@@ -4,8 +4,8 @@
 # Port for WebRTC (UDP)
 rtc:
   port_range_start: 50000
-  port_range_end: 60000
-  use_external_ip: true
+  port_range_end: 50200
+  use_external_ip: false
 
 # Room settings
 room:
@@ -14,19 +14,12 @@ room:
   max_participants: 8       # Match our game room max
 
 # API keys (generated for development)
-# In production, use environment variables: LIVEKIT_API_KEY, LIVEKIT_API_SECRET
 keys:
   devkey: secret123456789abcdefghij
 
 # Logging
 logging:
   level: info
-  json: false
 
-# Development mode - no TLS required
+# Development mode
 development: true
-
-# Listen addresses
-listen_addresses:
-  - "0.0.0.0:7880"    # HTTP/WebSocket
-  - "0.0.0.0:7881"    # RTCPmux for WebRTC
