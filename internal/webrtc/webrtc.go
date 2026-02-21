@@ -77,8 +77,9 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 
 	// Handle incoming tracks - forward to all OTHER players
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("🎥 [%s] Received %s track, forwarding to others", playerID, track.Kind())
-
+		log.Printf("🎥 [%s] INCOMING %s track! Codec: %s, SSRC: %d", 
+			playerID, track.Kind(), track.Codec().MimeType, track.SSRC())
+		
 		// Store incoming track
 		m.mu.Lock()
 		m.incomingTracks[playerID][track.ID()] = track
@@ -103,7 +104,6 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 		if candidate == nil {
 			return
 		}
-		// ICE candidates are sent via the signaling channel (WebSocket)
 	})
 
 	// Handle connection state
@@ -117,6 +117,7 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 	})
 
 	m.peerConns[playerID] = pc
+	log.Printf("✅ [%s] Peer connection created, total: %d", playerID, len(m.peerConns))
 	return pc, nil
 }
 
@@ -142,7 +143,7 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 		"stream-"+fromPlayerID,
 	)
 	if err != nil {
-		log.Printf("❌ Failed to create local track: %v", err)
+		log.Printf("❌ [%s] Failed to create local track: %v", fromPlayerID, err)
 		return
 	}
 
@@ -158,15 +159,26 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 
 	// Read and forward RTP packets
 	rtpBuf := make([]byte, 1500)
+	packets := 0
 	for {
-		n, _, err := track.Read(rtpBuf)
+		n, attr, err := track.Read(rtpBuf)
 		if err != nil {
-			log.Printf("📭 [%s] Track ended: %v", fromPlayerID, err)
+			log.Printf("📭 [%s] Track read ended: %v", fromPlayerID, err)
 			return
 		}
+		_ = attr
 
 		if _, err := localTrack.Write(rtpBuf[:n]); err != nil {
-			log.Printf("❌ RTP write error: %v", err)
+			log.Printf("❌ [%s] RTP write error: %v", fromPlayerID, err)
+			return
+		}
+		
+		packets++
+		if packets == 1 {
+			log.Printf("📤 [%s] First %s packet forwarded!", fromPlayerID, track.Kind())
+		}
+		if packets % 100 == 0 {
+			log.Printf("📤 [%s] Forwarded %d %s packets", fromPlayerID, packets, track.Kind())
 		}
 	}
 }
@@ -220,7 +232,7 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 	audioCount := len(m.audioTracks)
 	videoCount := len(m.videoTracks)
 	log.Printf("🎥 [%s] Existing tracks: %d audio, %d video", playerID, audioCount, videoCount)
-	
+
 	for otherPlayerID, audioTrack := range m.audioTracks {
 		if otherPlayerID != playerID {
 			if _, err := pc.AddTrack(audioTrack); err != nil {
