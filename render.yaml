@@ -1,17 +1,34 @@
 services:
+  # LiveKit server for video/voice
+  - type: web
+    name: gameserver-livekit
+    env: docker
+    plan: starter
+    dockerfilePath: ./docker/livekit/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: LIVEKIT_API_SECRET
+        generateValue: true  # Auto-generate a secret
+      - key: LIVEKIT_API_KEY
+        value: devkey
+    healthCheckPath: /
+
+  # Webbridge - game server + WebSocket bridge
   - type: web
     name: gameserver-webbridge
     env: docker
-    plan: starter  # $7/month, more resources
+    plan: starter
     dockerfilePath: ./Dockerfile
     dockerContext: .
     envVars:
       - key: PORT
         value: 8080
       - key: LIVEKIT_URL
-        value: wss://your-livekit-instance.render.com  # Or LiveKit Cloud URL
+        # Will be set to the livekit service URL after deployment
+        value: ws://gameserver-livekit.onrender.com:7880
       - key: LIVEKIT_API_KEY
-        sync: false  # Set manually in dashboard
+        value: devkey
       - key: LIVEKIT_API_SECRET
-        sync: false  # Set manually in dashboard
+        # Same secret as livekit service
+        sync: false
     healthCheckPath: /status
