@@ -111,6 +111,28 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 			m.RemovePeerConnection(playerID)
 		}
 	})
+	
+	// Track handlers - runs when client sends media
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🎥 [%s] INCOMING %s track! SSRC: %d, Codec: %s", playerID, track.Kind(), track.SSRC(), track.Codec().MimeType)
+		
+		// Store incoming track
+		m.mu.Lock()
+		if m.incomingTracks[playerID] == nil {
+			m.incomingTracks[playerID] = make(map[string]*webrtc.TrackRemote)
+		}
+		m.incomingTracks[playerID][string(track.Kind())] = track
+		m.mu.Unlock()
+		
+		// Notify about new track
+		select {
+		case m.trackChan <- TrackEvent{PlayerID: playerID, Track: track, RTP: receiver}:
+		default:
+		}
+		
+		// Forward this track to all OTHER players
+		go m.forwardTrackToOthers(playerID, track)
+	})
 
 	m.peerConns[playerID] = pc
 	log.Printf("✅ [%s] Peer connection created, total: %d", playerID, len(m.peerConns))
@@ -251,22 +273,23 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 
 	// Add existing tracks from other players
 	m.mu.RLock()
-	log.Printf("🎥 [%s] Existing tracks: %d audio, %d video", playerID, len(m.audioTracks), len(m.videoTracks))
+	log.Printf("🎥 [%s] HandleOffer: %d players in room, %d audio tracks, %d video tracks", 
+		playerID, len(m.peerConns), len(m.audioTracks), len(m.videoTracks))
 	for otherPlayerID, audioTrack := range m.audioTracks {
 		if otherPlayerID != playerID {
 			if _, err := pc.AddTrack(audioTrack); err != nil {
-				log.Printf("❌ Failed to add audio from %s: %v", otherPlayerID, err)
+				log.Printf("❌ Failed to add audio from %s to %s: %v", otherPlayerID, playerID, err)
 			} else {
-				log.Printf("🎵 Added audio from %s", otherPlayerID)
+				log.Printf("🎵 Added audio from %s to %s", otherPlayerID, playerID)
 			}
 		}
 	}
 	for otherPlayerID, videoTrack := range m.videoTracks {
 		if otherPlayerID != playerID {
 			if _, err := pc.AddTrack(videoTrack); err != nil {
-				log.Printf("❌ Failed to add video from %s: %v", otherPlayerID, err)
+				log.Printf("❌ Failed to add video from %s to %s: %v", otherPlayerID, playerID, err)
 			} else {
-				log.Printf("📹 Added video from %s", otherPlayerID)
+				log.Printf("📹 Added video from %s to %s", otherPlayerID, playerID)
 			}
 		}
 	}

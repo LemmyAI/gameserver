@@ -92,7 +92,8 @@ async function connectWebRTC() {
 
         // Handle incoming tracks - only show when there's actual data
         peerConnection.ontrack = (event) => {
-            console.log('📺 Received track:', event.track.kind, 'muted:', event.track.muted);
+            console.log('📺 Received track:', event.track.kind, 'muted:', event.track.muted, 'id:', event.track.id);
+            console.log('📺 Stream:', event.streams[0]?.id, 'tracks:', event.streams[0]?.getTracks().map(t => t.kind));
             
             // Don't show muted (empty) tracks - wait for actual data
             if (event.track.muted) {
