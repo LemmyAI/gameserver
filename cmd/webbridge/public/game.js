@@ -99,40 +99,44 @@ async function connectWebRTC() {
             }
         };
 
-        // Get local media
+        // Get local media (try separately, don't require both)
+        let hasAudio = false, hasVideo = false;
+        
+        // Try audio first
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({
-                audio: micEnabled,
-                video: camEnabled
+            const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            audioStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, new MediaStream([track]));
+                hasAudio = true;
             });
-            
-            console.log('🎤 Got local stream:', localStream.getTracks().length, 'tracks');
-            
-            // Add tracks to connection
-            localStream.getTracks().forEach(track => {
-                peerConnection.addTrack(track, localStream);
-                console.log('➕ Added track:', track.kind);
+            console.log('🎤 Audio track added');
+        } catch (e) {
+            console.log('🎤 No audio available:', e.message);
+        }
+        
+        // Try video separately
+        try {
+            const videoStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+            videoStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, new MediaStream([track]));
+                hasVideo = true;
             });
+            console.log('📷 Video track added');
+        } catch (e) {
+            console.log('📷 No video available:', e.message);
+        }
 
-            // Show self
-            addSelfToGrid(localStream);
-
-        } catch (mediaErr) {
-            console.warn('Media access denied:', mediaErr);
-            
-            // More helpful error messages
-            let msg = 'Camera/mic unavailable';
-            if (mediaErr.name === 'NotAllowedError') {
-                msg = 'Permission denied - click the 🔒 icon in the URL bar to allow camera/mic';
-            } else if (mediaErr.name === 'NotFoundError') {
-                msg = 'No camera/mic found on this device';
-            } else if (mediaErr.name === 'NotReadableError') {
-                msg = 'Camera/mic is in use by another app';
-            }
-            showToast(msg);
-            
-            // Still connect for audio-only or just game
-            addSelfToGrid(null); // Show placeholder
+        // Create local stream for display (if we have any tracks)
+        if (hasAudio || hasVideo) {
+            const tracks = peerConnection.getSenders().map(s => s.track).filter(t => t);
+            localStream = new MediaStream(tracks);
+        }
+        
+        // Show self in grid (with or without video)
+        addSelfToGrid(localStream, hasVideo);
+        
+        if (!hasAudio && !hasVideo) {
+            showToast('No camera/mic - you can still see and hear others!');
         }
 
         // Create offer
@@ -154,7 +158,7 @@ async function connectWebRTC() {
     }
 }
 
-function addSelfToGrid(stream) {
+function addSelfToGrid(stream, hasVideo = true) {
     const grid = document.getElementById('video-grid');
     
     // Remove if exists
@@ -165,7 +169,7 @@ function addSelfToGrid(stream) {
     div.className = 'video-tile self';
     div.id = `video-${myId}`;
 
-    if (stream) {
+    if (stream && hasVideo) {
         const video = document.createElement('video');
         video.autoplay = true;
         video.muted = true; // Mute self to prevent feedback
@@ -176,8 +180,8 @@ function addSelfToGrid(stream) {
         // Placeholder when no camera
         const placeholder = document.createElement('div');
         placeholder.className = 'video-placeholder';
-        placeholder.innerHTML = '🎥❌<br><small>No camera</small>';
-        placeholder.style.cssText = 'display:flex;align-items:center;justify-content:center;flex-direction:column;color:#888;font-size:24px;height:100%;';
+        placeholder.innerHTML = '🎤<br><small>' + (stream ? 'Audio only' : 'No media') + '</small>';
+        placeholder.style.cssText = 'display:flex;align-items:center;justify-content:center;flex-direction:column;color:#888;font-size:24px;height:100%;background:#1a1a2e;';
         div.appendChild(placeholder);
     }
 
