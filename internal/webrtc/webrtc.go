@@ -122,86 +122,51 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 
 // forwardTrackToOthers reads RTP from one player and forwards to all others
 func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackRemote) {
-	// Create a local track to forward to others
 	var localTrack *webrtc.TrackLocalStaticRTP
 	var err error
 
-	// Get codec capability from the track
 	codec := track.Codec()
+	mimeType := codec.MimeType
 
-	// Create local track with same codec as incoming
-	if track.Kind() == webrtc.RTPCodecTypeAudio {
-		localTrack, err = webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{MimeType: codec.MimeType},
-			"audio-"+fromPlayerID,
-			"audio-stream",
-		)
-		if err == nil {
-			m.mu.Lock()
-			m.audioTracks[fromPlayerID] = localTrack
-			m.mu.Unlock()
-		}
-	} else {
-		localTrack, err = webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{MimeType: codec.MimeType},
-			"video-"+fromPlayerID,
-			"video-stream",
-		)
-		if err == nil {
-			m.mu.Lock()
-			m.videoTracks[fromPlayerID] = localTrack
-			m.mu.Unlock()
-		}
+	// Include clock rate for proper negotiation
+	capability := webrtc.RTPCodecCapability{
+		MimeType:  mimeType,
+		ClockRate: codec.ClockRate,
+		Channels:  codec.Channels,
 	}
 
+	// Create local track
+	localTrack, err = webrtc.NewTrackLocalStaticRTP(
+		capability,
+		"track-"+fromPlayerID+"-"+string(track.Kind()),
+		"stream-"+fromPlayerID,
+	)
 	if err != nil {
 		log.Printf("❌ Failed to create local track: %v", err)
 		return
 	}
 
-	log.Printf("📷 Created local %s track from %s (codec: %s)", track.Kind(), fromPlayerID, codec.MimeType)
-
-	// Add this track to all OTHER players' connections
-	m.mu.RLock()
-	otherPlayers := 0
-	for playerID, pc := range m.peerConns {
-		if playerID == fromPlayerID {
-			continue // Don't send to self
-		}
-
-		_, err := pc.AddTrack(localTrack)
-		if err != nil {
-			log.Printf("❌ Failed to add track to %s: %v", playerID, err)
-			continue
-		}
-		otherPlayers++
-		log.Printf("✅ Added %s track from %s to %s", track.Kind(), fromPlayerID, playerID)
+	// Store track
+	m.mu.Lock()
+	if track.Kind() == webrtc.RTPCodecTypeAudio {
+		m.audioTracks[fromPlayerID] = localTrack
+	} else {
+		m.videoTracks[fromPlayerID] = localTrack
 	}
-	m.mu.RUnlock()
+	log.Printf("📷 [%s] Created %s track (mime: %s, clock: %d)", fromPlayerID, track.Kind(), mimeType, codec.ClockRate)
+	m.mu.Unlock()
 
-	if otherPlayers == 0 {
-		log.Printf("⚠️ No other players to forward to yet - track stored for future joins")
-	}
-
-	// Read RTP packets from incoming track and forward to local track
+	// Read and forward RTP packets
 	rtpBuf := make([]byte, 1500)
-	packetsForwarded := 0
 	for {
 		n, _, err := track.Read(rtpBuf)
 		if err != nil {
-			log.Printf("📭 [%s] Track read ended: %v", fromPlayerID, err)
+			log.Printf("📭 [%s] Track ended: %v", fromPlayerID, err)
 			return
 		}
 
-		// Forward to local track (which sends to all subscribed players)
 		if _, err := localTrack.Write(rtpBuf[:n]); err != nil {
-			log.Printf("❌ Failed to write RTP: %v", err)
-			return
-		}
-		
-		packetsForwarded++
-		if packetsForwarded % 100 == 0 {
-			log.Printf("📤 [%s] Forwarded %d %s packets", fromPlayerID, packetsForwarded, track.Kind())
+			log.Printf("❌ RTP write error: %v", err)
 		}
 	}
 }

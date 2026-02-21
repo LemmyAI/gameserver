@@ -139,6 +139,11 @@ async function connectWebRTC() {
             showToast('No camera/mic - you can still see and hear others!');
         }
 
+        // Add transceivers for receiving remote tracks (CRITICAL!)
+        // This tells the server we want to receive audio/video from others
+        peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+        peerConnection.addTransceiver('video', { direction: 'recvonly' });
+
         // Create offer
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
