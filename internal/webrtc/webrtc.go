@@ -248,6 +248,16 @@ func (m *Manager) CreateOffer(playerID string) (*webrtc.SessionDescription, erro
 		return nil, nil
 	}
 
+	// Check signaling state
+	state := pc.SignalingState()
+	log.Printf("📤 [%s] CreateOffer: signaling state = %s", playerID, state)
+	
+	if state != webrtc.SignalingStateStable {
+		log.Printf("⚠️ [%s] CreateOffer: signaling state is %s, not stable - skipping renegotiation", playerID, state)
+		// We'll need to retry later, for now skip
+		return nil, nil
+	}
+
 	// Log what we have before creating offer
 	log.Printf("📤 [%s] CreateOffer: senders=%d, transceivers=%d", playerID, len(pc.GetSenders()), len(pc.GetTransceivers()))
 	for i, s := range pc.GetSenders() {
