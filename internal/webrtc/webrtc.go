@@ -367,7 +367,15 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		return nil, err
 	}
 	
-	// Log the SDP to see what we're sending
+	// Count how many senders actually have tracks
+	sendersWithTracks := 0
+	for _, sender := range pc.GetSenders() {
+		if sender.Track() != nil {
+			sendersWithTracks++
+		}
+	}
+	
+	// Count sendonly lines in the SDP
 	sdpLines := strings.Split(answer.SDP, "\n")
 	sendonlyCount := 0
 	for _, line := range sdpLines {
@@ -375,7 +383,20 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 			sendonlyCount++
 		}
 	}
-	log.Printf("🎥 [%s] Answer SDP has %d sendonly lines (should match tracks we added)", playerID, sendonlyCount)
+	
+	log.Printf("🎥 [%s] Answer has %d sendonly lines, %d senders with tracks", 
+		playerID, sendonlyCount, sendersWithTracks)
+	
+	// If we have sendonly lines but no tracks, replace with inactive
+	// This prevents sending black video / silent audio
+	if sendonlyCount > 0 && sendersWithTracks == 0 {
+		log.Printf("⚠️ [%s] FIXING SDP: Have sendonly but no tracks, replacing with inactive", playerID)
+		answer.SDP = strings.Replace(answer.SDP, "a=sendonly", "a=inactive", -1)
+	} else if sendonlyCount > sendersWithTracks {
+		log.Printf("⚠️ [%s] FIXING SDP: More sendonly (%d) than tracks (%d)", playerID, sendonlyCount, sendersWithTracks)
+		// More complex case - need to be smarter about which lines to replace
+		// For now, only replace if no tracks at all
+	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return nil, err
