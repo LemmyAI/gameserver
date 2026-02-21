@@ -9,16 +9,24 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// RenegotiateEvent is sent when a new track needs to be sent to existing players
+type RenegotiateEvent struct {
+	PlayerID string
+	Track    *webrtc.TrackLocalStaticRTP
+	Kind     webrtc.RTPCodecType
+}
+
 // Manager handles WebRTC peer connections for a room (SFU mode)
 type Manager struct {
-	mu            sync.RWMutex
-	roomID        string
-	peerConns     map[string]*webrtc.PeerConnection // playerID -> connection
-	incomingTracks map[string]map[string]*webrtc.TrackRemote // playerID -> trackID -> track
-	audioTracks   map[string]*webrtc.TrackLocalStaticRTP // playerID -> audio track to send
-	videoTracks   map[string]*webrtc.TrackLocalStaticRTP // playerID -> video track to send
-	trackChan     chan TrackEvent
-	iceServers    []webrtc.ICEServer
+	mu             sync.RWMutex
+	roomID         string
+	peerConns      map[string]*webrtc.PeerConnection // playerID -> connection
+	incomingTracks map[string]map[string]*webrtc.TrackRemote
+	audioTracks    map[string]*webrtc.TrackLocalStaticRTP
+	videoTracks    map[string]*webrtc.TrackLocalStaticRTP
+	trackChan      chan TrackEvent
+	renegotiateChan chan RenegotiateEvent
+	iceServers     []webrtc.ICEServer
 }
 
 // TrackEvent is sent when a track is received
@@ -30,22 +38,23 @@ type TrackEvent struct {
 
 // SignalMessage is sent over WebSocket for signaling
 type SignalMessage struct {
-	Type      string          `json:"type"`      // "offer", "answer", "ice-candidate"
-	PlayerID  string          `json:"playerId"`  // Who this is from/to
+	Type      string          `json:"type"`
+	PlayerID  string          `json:"playerId"`
 	RoomID    string          `json:"roomId"`
-	SDP       string          `json:"sdp"`       // For offer/answer
-	Candidate json.RawMessage `json:"candidate"` // For ICE candidate
+	SDP       string          `json:"sdp"`
+	Candidate json.RawMessage `json:"candidate"`
 }
 
 // NewManager creates a new WebRTC manager for a room
 func NewManager(roomID string) *Manager {
 	return &Manager{
-		roomID:         roomID,
-		peerConns:      make(map[string]*webrtc.PeerConnection),
-		incomingTracks: make(map[string]map[string]*webrtc.TrackRemote),
-		audioTracks:    make(map[string]*webrtc.TrackLocalStaticRTP),
-		videoTracks:    make(map[string]*webrtc.TrackLocalStaticRTP),
-		trackChan:      make(chan TrackEvent, 100),
+		roomID:          roomID,
+		peerConns:       make(map[string]*webrtc.PeerConnection),
+		incomingTracks:  make(map[string]map[string]*webrtc.TrackRemote),
+		audioTracks:     make(map[string]*webrtc.TrackLocalStaticRTP),
+		videoTracks:     make(map[string]*webrtc.TrackLocalStaticRTP),
+		trackChan:       make(chan TrackEvent, 100),
+		renegotiateChan: make(chan RenegotiateEvent, 100),
 		iceServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
 			{URLs: []string{"stun:stun1.l.google.com:19302"}},
@@ -58,7 +67,6 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if already exists
 	if pc, exists := m.peerConns[playerID]; exists {
 		return pc, nil
 	}
@@ -72,41 +80,29 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 		return nil, err
 	}
 
-	// Initialize incoming tracks map for this player
 	m.incomingTracks[playerID] = make(map[string]*webrtc.TrackRemote)
 
-	// Handle incoming tracks - forward to all OTHER players
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("🎥 [%s] INCOMING %s track! Codec: %s, SSRC: %d", 
-			playerID, track.Kind(), track.Codec().MimeType, track.SSRC())
+		log.Printf("🎥 [%s] INCOMING %s track! Codec: %s", playerID, track.Kind(), track.Codec().MimeType)
 		
-		// Store incoming track
 		m.mu.Lock()
 		m.incomingTracks[playerID][track.ID()] = track
 		m.mu.Unlock()
 
-		// Forward RTP packets to all other players
 		go m.forwardTrackToOthers(playerID, track)
 
-		// Notify via channel
 		select {
-		case m.trackChan <- TrackEvent{
-			PlayerID: playerID,
-			Track:    track,
-			RTP:      receiver,
-		}:
+		case m.trackChan <- TrackEvent{PlayerID: playerID, Track: track, RTP: receiver}:
 		default:
 		}
 	})
 
-	// Handle ICE candidates
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
 			return
 		}
 	})
 
-	// Handle connection state
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("🎥 [%s] Connection state: %s", playerID, state)
 		if state == webrtc.PeerConnectionStateDisconnected ||
@@ -123,21 +119,15 @@ func (m *Manager) CreatePeerConnection(playerID string) (*webrtc.PeerConnection,
 
 // forwardTrackToOthers reads RTP from one player and forwards to all others
 func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackRemote) {
-	var localTrack *webrtc.TrackLocalStaticRTP
-	var err error
-
 	codec := track.Codec()
-	mimeType := codec.MimeType
-
-	// Include clock rate for proper negotiation
+	
 	capability := webrtc.RTPCodecCapability{
-		MimeType:  mimeType,
+		MimeType:  codec.MimeType,
 		ClockRate: codec.ClockRate,
 		Channels:  codec.Channels,
 	}
 
-	// Create local track
-	localTrack, err = webrtc.NewTrackLocalStaticRTP(
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		capability,
 		"track-"+fromPlayerID+"-"+string(track.Kind()),
 		"stream-"+fromPlayerID,
@@ -147,26 +137,46 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 		return
 	}
 
-	// Store track
 	m.mu.Lock()
 	if track.Kind() == webrtc.RTPCodecTypeAudio {
 		m.audioTracks[fromPlayerID] = localTrack
 	} else {
 		m.videoTracks[fromPlayerID] = localTrack
 	}
-	log.Printf("📷 [%s] Created %s track (mime: %s, clock: %d)", fromPlayerID, track.Kind(), mimeType, codec.ClockRate)
+	
+	// Add track to all OTHER players and prepare renegotiation
+	var toRenegotiate []string
+	for playerID := range m.peerConns {
+		if playerID != fromPlayerID {
+			if _, err := m.peerConns[playerID].AddTrack(localTrack); err != nil {
+				log.Printf("❌ Failed to add track to %s: %v", playerID, err)
+			} else {
+				log.Printf("✅ Added %s track from %s to %s", track.Kind(), fromPlayerID, playerID)
+				toRenegotiate = append(toRenegotiate, playerID)
+			}
+		}
+	}
 	m.mu.Unlock()
 
-	// Read and forward RTP packets
+	log.Printf("📷 [%s] Created %s track, renegotiate needed for: %v", fromPlayerID, track.Kind(), toRenegotiate)
+
+	// Queue renegotiation events
+	for _, playerID := range toRenegotiate {
+		select {
+		case m.renegotiateChan <- RenegotiateEvent{PlayerID: playerID, Track: localTrack, Kind: track.Kind()}:
+		default:
+		}
+	}
+
+	// Forward RTP packets
 	rtpBuf := make([]byte, 1500)
 	packets := 0
 	for {
-		n, attr, err := track.Read(rtpBuf)
+		n, _, err := track.Read(rtpBuf)
 		if err != nil {
-			log.Printf("📭 [%s] Track read ended: %v", fromPlayerID, err)
+			log.Printf("📭 [%s] Track ended: %v", fromPlayerID, err)
 			return
 		}
-		_ = attr
 
 		if _, err := localTrack.Write(rtpBuf[:n]); err != nil {
 			log.Printf("❌ [%s] RTP write error: %v", fromPlayerID, err)
@@ -175,26 +185,37 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 		
 		packets++
 		if packets == 1 {
-			log.Printf("📤 [%s] First %s packet forwarded!", fromPlayerID, track.Kind())
-		}
-		if packets % 100 == 0 {
-			log.Printf("📤 [%s] Forwarded %d %s packets", fromPlayerID, packets, track.Kind())
+			log.Printf("📤 [%s] First %s packet!", fromPlayerID, track.Kind())
 		}
 	}
 }
 
-// renegotiatePlayer creates a new offer for a player (when new tracks added)
-func (m *Manager) renegotiatePlayer(playerID string) {
+// GetRenegotiateChan returns the channel for renegotiation events
+func (m *Manager) GetRenegotiateChan() <-chan RenegotiateEvent {
+	return m.renegotiateChan
+}
+
+// CreateOffer creates a new offer for a player (for renegotiation)
+func (m *Manager) CreateOffer(playerID string) (*webrtc.SessionDescription, error) {
 	m.mu.RLock()
-	_, exists := m.peerConns[playerID]
+	pc, exists := m.peerConns[playerID]
 	m.mu.RUnlock()
 
 	if !exists {
-		return
+		return nil, nil
 	}
 
-	// For now, just log - full renegotiation requires offer/answer exchange via signaling
-	log.Printf("🔄 Player %s needs renegotiation for new tracks", playerID)
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := pc.SetLocalDescription(offer); err != nil {
+		return nil, err
+	}
+
+	log.Printf("📤 [%s] Created renegotiation offer", playerID)
+	return &offer, nil
 }
 
 // RemovePeerConnection removes a player's peer connection
@@ -218,7 +239,6 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		return nil, err
 	}
 
-	// Set remote description (the offer)
 	offer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
 		SDP:  sdp,
@@ -227,45 +247,39 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		return nil, err
 	}
 
-	// Add existing tracks from other players to this new player
+	// Add existing tracks from other players
 	m.mu.RLock()
-	audioCount := len(m.audioTracks)
-	videoCount := len(m.videoTracks)
-	log.Printf("🎥 [%s] Existing tracks: %d audio, %d video", playerID, audioCount, videoCount)
-
+	log.Printf("🎥 [%s] Existing tracks: %d audio, %d video", playerID, len(m.audioTracks), len(m.videoTracks))
 	for otherPlayerID, audioTrack := range m.audioTracks {
 		if otherPlayerID != playerID {
 			if _, err := pc.AddTrack(audioTrack); err != nil {
-				log.Printf("❌ Failed to add audio from %s to %s: %v", otherPlayerID, playerID, err)
+				log.Printf("❌ Failed to add audio from %s: %v", otherPlayerID, err)
 			} else {
-				log.Printf("🎵 Added audio from %s to new player %s", otherPlayerID, playerID)
+				log.Printf("🎵 Added audio from %s", otherPlayerID)
 			}
 		}
 	}
 	for otherPlayerID, videoTrack := range m.videoTracks {
 		if otherPlayerID != playerID {
 			if _, err := pc.AddTrack(videoTrack); err != nil {
-				log.Printf("❌ Failed to add video from %s to %s: %v", otherPlayerID, playerID, err)
+				log.Printf("❌ Failed to add video from %s: %v", otherPlayerID, err)
 			} else {
-				log.Printf("📹 Added video from %s to new player %s", otherPlayerID, playerID)
+				log.Printf("📹 Added video from %s", otherPlayerID)
 			}
 		}
 	}
 	m.mu.RUnlock()
 
-	// Create answer
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
-		log.Printf("❌ Failed to create answer: %v", err)
 		return nil, err
 	}
 
-	// Set local description
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return nil, err
 	}
 
-	log.Printf("✅ [%s] Created answer with %d senders", playerID, len(pc.GetSenders()))
+	log.Printf("✅ [%s] Answer created, senders: %d", playerID, len(pc.GetSenders()))
 	return &answer, nil
 }
 
@@ -276,7 +290,7 @@ func (m *Manager) HandleAnswer(playerID string, sdp string) error {
 	m.mu.RUnlock()
 
 	if !exists {
-		return nil // Player might have disconnected
+		return nil
 	}
 
 	answer := webrtc.SessionDescription{
@@ -319,6 +333,7 @@ func (m *Manager) Close() {
 	}
 	m.peerConns = make(map[string]*webrtc.PeerConnection)
 	close(m.trackChan)
+	close(m.renegotiateChan)
 }
 
 // GenerateClientID generates a unique ID for WebRTC

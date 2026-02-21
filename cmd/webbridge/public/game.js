@@ -90,21 +90,24 @@ async function connectWebRTC() {
             }
         };
 
-        // Handle incoming tracks
+        // Handle incoming tracks - only show when there's actual data
         peerConnection.ontrack = (event) => {
-            console.log('📺 Received track:', event.track.kind, 'id:', event.track.id, 'enabled:', event.track.enabled, 'muted:', event.track.muted);
-            console.log('📺 Streams:', event.streams.length, event.streams.map(s => s.id));
+            console.log('📺 Received track:', event.track.kind, 'muted:', event.track.muted);
+            
+            // Don't show muted (empty) tracks - wait for actual data
+            if (event.track.muted) {
+                console.log('📺 Track is muted (no data yet), waiting...');
+                event.track.onunmute = () => {
+                    console.log('📺 Track unmuted! Now showing');
+                    const stream = event.streams[0];
+                    if (stream) addRemoteStream(stream);
+                };
+                return;
+            }
             
             const stream = event.streams[0];
             if (stream) {
-                // Log when track gets data
-                event.track.onunmute = () => console.log('📺 Track unmuted:', event.track.kind);
-                event.track.onmute = () => console.log('📺 Track muted:', event.track.kind);
-                event.track.onended = () => console.log('📺 Track ended:', event.track.kind);
-                
                 addRemoteStream(stream);
-            } else {
-                console.warn('📺 No stream in track event!');
             }
         };
 
@@ -266,6 +269,43 @@ async function handleWebRTCIce(data) {
     }
 }
 
+async function handleWebRTCRenegotiateOffer(data) {
+    if (!peerConnection) {
+        console.warn('No peer connection for renegotiation');
+        return;
+    }
+    
+    console.log('🔄 Received renegotiation offer from server');
+    
+    try {
+        // Set remote description (the new offer)
+        await peerConnection.setRemoteDescription({
+            type: 'offer',
+            sdp: data.sdp
+        });
+        
+        console.log('🔄 Remote description set, creating answer...');
+        
+        // Create answer
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        
+        console.log('🔄 Sending renegotiation answer');
+        
+        // Send answer back
+        ws.send(JSON.stringify({
+            type: 'webrtc_answer',
+            roomId: ROOM_ID,
+            playerId: myId,
+            sdp: answer.sdp
+        }));
+        
+        showToast('New player joined video!');
+    } catch (err) {
+        console.error('Renegotiation error:', err);
+    }
+}
+
 function toggleMic() {
     micEnabled = !micEnabled;
     document.getElementById('btn-mic').textContent = micEnabled ? '🎤' : '🔇';
@@ -382,8 +422,8 @@ function handleMessage(data) {
             break;
             
         case 'webrtc_offer':
-            // For now, we're the initiator (caller)
-            // In a full mesh, we'd handle incoming offers too
+            // Server-initiated renegotiation offer
+            handleWebRTCRenegotiateOffer(data);
             break;
             
         case 'error':

@@ -604,11 +604,48 @@ func (b *Bridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"browser_clients":%d,"game_rooms":%d,"rooms":%d}`, clientCount, roomCount, b.rooms.Count())
 }
 
-// handleWebRTCTracks handles incoming WebRTC tracks and broadcasts them to other players
+// handleWebRTCTracks handles incoming WebRTC tracks and renegotiation
 func (b *Bridge) handleWebRTCTracks(gr *GameRoom) {
-	for event := range gr.WebRTC.GetTrackEvents() {
-		log.Printf("🎥 Broadcasting track from %s to room %s", event.PlayerID, gr.ID)
-		// For now, just log - full implementation would forward tracks
+	for {
+		select {
+		case event := <-gr.WebRTC.GetTrackEvents():
+			log.Printf("🎥 Track event from %s in room %s", event.PlayerID, gr.ID)
+			
+		case renegotiate := <-gr.WebRTC.GetRenegotiateChan():
+			log.Printf("🔄 Renegotiation needed for %s (%s)", renegotiate.PlayerID, renegotiate.Kind)
+			
+			// Create new offer for this player
+			offer, err := gr.WebRTC.CreateOffer(renegotiate.PlayerID)
+			if err != nil {
+				log.Printf("❌ Failed to create renegotiation offer: %v", err)
+				continue
+			}
+			
+			// Find the WebSocket connection for this player
+			b.mu.RLock()
+			var targetConn *websocket.Conn
+			for ws, client := range b.clients {
+				if client.playerID == renegotiate.PlayerID && client.roomID == gr.ID {
+					targetConn = ws
+					break
+				}
+			}
+			b.mu.RUnlock()
+			
+			if targetConn == nil {
+				log.Printf("⚠️ No connection found for player %s", renegotiate.PlayerID)
+				continue
+			}
+			
+			// Send offer to client
+			targetConn.WriteJSON(map[string]interface{}{
+				"type":     "webrtc_offer",
+				"roomId":   gr.ID,
+				"playerId": renegotiate.PlayerID,
+				"sdp":      offer.SDP,
+			})
+			log.Printf("📤 Sent renegotiation offer to %s", renegotiate.PlayerID)
+		}
 	}
 }
 
