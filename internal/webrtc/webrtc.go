@@ -331,17 +331,35 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 	}
 	m.mu.RUnlock()
 	
-	// CRITICAL: Stop any transceivers that don't have tracks to send
-	// This prevents the server from sending empty/black video
+	log.Printf("🎥 [%s] Transceivers after adding tracks:", playerID)
+	for i, t := range pc.GetTransceivers() {
+		sender := t.Sender()
+		hasTrack := sender != nil && sender.Track() != nil
+		log.Printf("🎥 [%s] Transceiver %d: direction=%v, hasTrack=%v", playerID, i, t.Direction(), hasTrack)
+	}
+	
+	// CRITICAL: For any transceiver where we don't have a track to send,
+	// stop it to prevent sending empty/black video.
+	// Pion auto-creates senders for recvonly offers, we need to remove them.
+	stoppedCount := 0
 	for _, t := range pc.GetTransceivers() {
-		if t.Direction() == webrtc.RTPTransceiverDirectionSendrecv {
-			// Check if this transceiver has a track
-			if t.Sender() == nil || t.Sender().Track() == nil {
-				log.Printf("🛑 [%s] Stopping sendrecv transceiver with no track (kind: %v)", playerID, t.Receiver().Track().Kind())
-				_ = t.Stop()
+		sender := t.Sender()
+		hasTrack := sender != nil && sender.Track() != nil
+		direction := t.Direction()
+		
+		// If this is a sending transceiver but we have no track, stop it
+		if (direction == webrtc.RTPTransceiverDirectionSendrecv || direction == webrtc.RTPTransceiverDirectionSendonly) && !hasTrack {
+			kind := "unknown"
+			if t.Receiver() != nil && t.Receiver().Track() != nil {
+				kind = string(t.Receiver().Track().Kind())
 			}
+			log.Printf("🛑 [%s] Stopping transceiver (was %v, no track, kind: %s)", playerID, direction, kind)
+			_ = t.Stop()
+			stoppedCount++
 		}
 	}
+	
+	log.Printf("🎥 [%s] Stopped %d transceivers without tracks", playerID, stoppedCount)
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
