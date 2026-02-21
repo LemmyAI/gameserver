@@ -3,6 +3,7 @@ package webrtc
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -357,16 +358,24 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 			playerID, i, t.Direction(), hasSenderTrack, recvKind)
 	}
 	
-	// DON'T stop transceivers anymore - it prevents renegotiation later!
-	// The client's recvonly transceivers will be upgraded when we add tracks
-	// Stopped transceivers become inactive and can't be used for sending
-	
-	log.Printf("🎥 [%s] Not stopping any transceivers (keeping for potential renegotiation)", playerID)
+	// Check the answer SDP for a=sendonly lines before sending
+	// If we have sendonly lines but no tracks, that's the loopback bug!
+	log.Printf("🎥 [%s] Checking SDP for unexpected sendonly...", playerID)
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		return nil, err
 	}
+	
+	// Log the SDP to see what we're sending
+	sdpLines := strings.Split(answer.SDP, "\n")
+	sendonlyCount := 0
+	for _, line := range sdpLines {
+		if strings.Contains(line, "a=sendonly") {
+			sendonlyCount++
+		}
+	}
+	log.Printf("🎥 [%s] Answer SDP has %d sendonly lines (should match tracks we added)", playerID, sendonlyCount)
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return nil, err
