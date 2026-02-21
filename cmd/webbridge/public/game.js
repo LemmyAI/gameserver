@@ -291,6 +291,9 @@ async function handleWebRTCIce(data) {
 }
 
 async function handleWebRTCRenegotiateOffer(data) {
+    console.log('🔄 [RENEGOTIATE] Received offer from server:', data.playerId);
+    console.log('🔄 [RENEGOTIATE] SDP length:', data.sdp?.length);
+    
     if (!peerConnection) {
         console.warn('No peer connection for renegotiation');
         return;
@@ -408,10 +411,12 @@ function handleMessage(data) {
             document.getElementById('player-count').textContent = data.playerCount;
             
             // Connect WebRTC after joining room
+            console.log('🎬 Starting WebRTC connection...');
             connectWebRTC();
             break;
             
         case 'player_joined':
+            console.log('👋 Player joined:', data.playerName, 'id:', data.playerId);
             showNotification(`👋 ${data.playerName} joined (${data.playerCount} players)`);
             document.getElementById('player-count').textContent = data.playerCount;
             break;
