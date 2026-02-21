@@ -1,4 +1,4 @@
-// Game client with room support and LiveKit video
+// Game client with native WebRTC video
 
 // Get room ID from URL: /room/{roomId}
 const pathParts = window.location.pathname.split('/');
@@ -19,11 +19,18 @@ const HOST = window.location.host;
 const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const HTTP_PROTOCOL = window.location.protocol;
 
-// LiveKit
-let room = null;
+// WebRTC
+let peerConnection = null;
+let localStream = null;
 let micEnabled = true;
 let camEnabled = true;
-let livekitConnected = false;
+let webrtcConnected = false;
+
+// ICE servers (STUN)
+const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+];
 
 // Canvas setup
 const canvas = document.getElementById('game');
@@ -36,141 +43,122 @@ function resizeCanvas() {
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
-// ================== LiveKit ==================
+// ================== WebRTC ==================
 
-async function connectLiveKit() {
-    console.log('🎥 connectLiveKit called - ROOM_ID:', ROOM_ID, 'myId:', myId, 'connected:', livekitConnected);
+async function connectWebRTC() {
+    console.log('🎥 connectWebRTC called - ROOM_ID:', ROOM_ID, 'myId:', myId, 'connected:', webrtcConnected);
 
     if (!ROOM_ID || !myId) {
-        console.log('⚠️ No room or player ID yet, skipping LiveKit');
+        console.log('⚠️ No room or player ID yet, skipping WebRTC');
         return;
     }
 
-    if (livekitConnected) {
-        console.log('🎥 LiveKit already connected');
+    if (webrtcConnected) {
+        console.log('🎥 WebRTC already connected');
         return;
     }
 
-    livekitConnected = true;
-    console.log('🎥 Starting LiveKit connection...');
+    webrtcConnected = true;
+    console.log('🎥 Starting WebRTC connection...');
 
     try {
-        // Get token from server
-        const res = await fetch('/livekit/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                roomId: ROOM_ID,
-                playerId: myId,
-                playerName: PLAYER_NAME
-            })
-        });
+        // Create peer connection
+        peerConnection = new RTCPeerConnection({ iceServers });
 
-        if (!res.ok) {
-            console.error('Failed to get LiveKit token');
-            return;
-        }
-
-        const { token, url } = await res.json();
-        console.log('🎥 Connecting to LiveKit:', url);
-
-        // Connect to LiveKit room
-        room = new LivekitClient.Room({
-            adaptiveStream: true,
-            dynacast: true,
-        });
-
-        // Handle participants
-        room.on(LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
-            console.log('👋 Participant joined:', participant.identity);
-            addVideoTrack(participant);
-        });
-
-        room.on(LivekitClient.RoomEvent.ParticipantDisconnected, (participant) => {
-            console.log('👋 Participant left:', participant.identity);
-            removeVideoTrack(participant.identity);
-        });
-
-        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-            console.log('📺 Track subscribed:', track.kind, 'from', participant.identity);
-            if (track.kind === 'video' || track.kind === 'audio') {
-                addVideoTrack(participant, track);
+        // Handle ICE candidates
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                console.log('🧊 ICE candidate:', event.candidate.type);
+                ws.send(JSON.stringify({
+                    type: 'webrtc_ice',
+                    roomId: ROOM_ID,
+                    playerId: myId,
+                    candidate: event.candidate.toJSON()
+                }));
             }
-        });
+        };
 
-        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
-            console.log('📺 Track unsubscribed:', track.kind);
-            if (track.kind === 'video') {
-                removeVideoTrack(participant.identity);
+        // Handle connection state changes
+        peerConnection.onconnectionstatechange = () => {
+            console.log('🎥 Connection state:', peerConnection.connectionState);
+            if (peerConnection.connectionState === 'connected') {
+                showToast('Video connected!');
+            } else if (peerConnection.connectionState === 'disconnected' ||
+                       peerConnection.connectionState === 'failed') {
+                showToast('Video disconnected');
+                webrtcConnected = false;
             }
-        });
+        };
 
-        // Connect
-        await room.connect(url, token);
-        console.log('✅ Connected to LiveKit room:', room.name);
+        // Handle incoming tracks
+        peerConnection.ontrack = (event) => {
+            console.log('📺 Received track:', event.track.kind);
+            const stream = event.streams[0];
+            if (stream) {
+                addRemoteStream(stream);
+            }
+        };
 
-        // Publish local tracks
-        await publishLocalTracks();
-
-        // Add existing participants (if any)
-        if (room.participants) {
-            room.participants.forEach((participant) => {
-                addVideoTrack(participant);
+        // Get local media
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({
+                audio: micEnabled,
+                video: camEnabled
             });
+            
+            console.log('🎤 Got local stream:', localStream.getTracks().length, 'tracks');
+            
+            // Add tracks to connection
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+                console.log('➕ Added track:', track.kind);
+            });
+
+            // Show self
+            addSelfToGrid(localStream);
+
+        } catch (mediaErr) {
+            console.warn('Media access denied or not available:', mediaErr.message);
+            showToast('Camera/mic not available');
         }
 
-        // Add self to video grid
-        addSelfToGrid();
+        // Create offer
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        
+        console.log('📤 Sending WebRTC offer');
+        ws.send(JSON.stringify({
+            type: 'webrtc_offer',
+            roomId: ROOM_ID,
+            playerId: myId,
+            sdp: offer.sdp
+        }));
 
     } catch (err) {
-        console.error('LiveKit connection error:', err);
+        console.error('WebRTC connection error:', err);
         showToast('Video connection failed');
+        webrtcConnected = false;
     }
 }
 
-async function publishLocalTracks() {
-    try {
-        // Publish microphone first
-        try {
-            const audioTrack = await LivekitClient.createLocalAudioTrack();
-            await room.localParticipant.publishTrack(audioTrack);
-            console.log('🎤 Published audio track');
-        } catch (audioErr) {
-            console.warn('Microphone not available:', audioErr.message);
-        }
-
-        // Publish camera (may fail if no camera)
-        try {
-            const videoTrack = await LivekitClient.createLocalVideoTrack();
-            await room.localParticipant.publishTrack(videoTrack);
-            console.log('📷 Published video track');
-        } catch (videoErr) {
-            console.warn('Camera not available:', videoErr.message);
-        }
-
-    } catch (err) {
-        console.error('Failed to publish tracks:', err);
-    }
-}
-
-function addSelfToGrid() {
+function addSelfToGrid(stream) {
     const grid = document.getElementById('video-grid');
+    
+    // Remove if exists
+    const existing = document.getElementById(`video-${myId}`);
+    if (existing) existing.remove();
+    
     const div = document.createElement('div');
     div.className = 'video-tile self';
     div.id = `video-${myId}`;
 
     const video = document.createElement('video');
     video.autoplay = true;
-    video.muted = true; // Mute self
+    video.muted = true; // Mute self to prevent feedback
     video.playsInline = true;
-
-    // Attach local video
-    if (room && room.localParticipant.videoTrackPublications.size > 0) {
-        room.localParticipant.videoTrackPublications.forEach((pub) => {
-            if (pub.track) {
-                video.srcObject = new MediaStream([pub.track.mediaStreamTrack]);
-            }
-        });
+    
+    if (stream) {
+        video.srcObject = stream;
     }
 
     const label = document.createElement('span');
@@ -182,389 +170,310 @@ function addSelfToGrid() {
     grid.appendChild(div);
 }
 
-function addVideoTrack(participant, track = null) {
+function addRemoteStream(stream, participantId) {
     const grid = document.getElementById('video-grid');
-    let div = document.getElementById(`video-${participant.identity}`);
+    
+    // Remove if exists
+    const existing = document.getElementById(`video-remote-${participantId || 'unknown'}`);
+    if (existing) existing.remove();
+    
+    const div = document.createElement('div');
+    div.className = 'video-tile';
+    div.id = `video-remote-${participantId || Date.now()}`;
 
-    if (!div) {
-        div = document.createElement('div');
-        div.className = 'video-tile';
-        div.id = `video-${participant.identity}`;
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    video.srcObject = stream;
 
-        const video = document.createElement('video');
-        video.autoplay = true;
-        video.playsInline = true;
-        video.id = `video-el-${participant.identity}`;
-        div.appendChild(video);
+    const label = document.createElement('span');
+    label.className = 'video-label';
+    label.textContent = 'Player';
 
-        const label = document.createElement('span');
-        label.className = 'video-label';
-        label.textContent = participant.name || participant.identity;
-        div.appendChild(label);
+    div.appendChild(video);
+    div.appendChild(label);
+    grid.appendChild(div);
+    
+    showNotification(`🎥 Player joined video`);
+}
 
-        grid.appendChild(div);
+async function handleWebRTCAnswer(data) {
+    if (!peerConnection) {
+        console.warn('No peer connection for answer');
+        return;
     }
-
-    // Attach track if provided
-    if (track && (track.kind === 'video' || track.kind === 'audio')) {
-        const video = document.getElementById(`video-el-${participant.identity}`);
-        if (video) {
-            if (track.kind === 'video') {
-                video.srcObject = new MediaStream([track.mediaStreamTrack]);
-            } else if (track.kind === 'audio') {
-                // Add audio to existing video element
-                const stream = video.srcObject || new MediaStream();
-                stream.addTrack(track.mediaStreamTrack);
-                video.srcObject = stream;
-            }
-        }
-    } else {
-        // Find any video/audio tracks for this participant
-        participant.videoTrackPublications?.forEach((pub) => {
-            if (pub.track) {
-                const video = document.getElementById(`video-el-${participant.identity}`);
-                if (video) {
-                    const stream = video.srcObject || new MediaStream();
-                    stream.addTrack(pub.track.mediaStreamTrack);
-                    video.srcObject = stream;
-                }
-            }
+    
+    console.log('📥 Received WebRTC answer');
+    try {
+        await peerConnection.setRemoteDescription({
+            type: 'answer',
+            sdp: data.sdp
         });
-        participant.audioTrackPublications?.forEach((pub) => {
-            if (pub.track) {
-                const video = document.getElementById(`video-el-${participant.identity}`);
-                if (video) {
-                    const stream = video.srcObject || new MediaStream();
-                    stream.addTrack(pub.track.mediaStreamTrack);
-                    video.srcObject = stream;
-                }
-            }
-        });
+        console.log('✅ Remote description set');
+    } catch (err) {
+        console.error('Failed to set remote description:', err);
     }
-
-    updatePlayerCount();
 }
 
-function removeVideoTrack(identity) {
-    const div = document.getElementById(`video-${identity}`);
-    if (div) {
-        div.remove();
+async function handleWebRTCIce(data) {
+    if (!peerConnection) {
+        console.warn('No peer connection for ICE candidate');
+        return;
     }
-    updatePlayerCount();
+    
+    console.log('📥 Received ICE candidate');
+    try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+    } catch (err) {
+        console.error('Failed to add ICE candidate:', err);
+    }
 }
 
-function updatePlayerCount() {
-    const grid = document.getElementById('video-grid');
-    const count = grid.children.length;
-    document.getElementById('player-count').textContent = count;
-}
-
-async function toggleMic() {
-    if (!room) return;
-
+function toggleMic() {
     micEnabled = !micEnabled;
-    const btn = document.getElementById('btn-mic');
-    btn.textContent = micEnabled ? '🎤' : '🔇';
-    btn.classList.toggle('disabled', !micEnabled);
-
-    await room.localParticipant.setMicrophoneEnabled(micEnabled);
+    document.getElementById('btn-mic').textContent = micEnabled ? '🎤' : '🔇';
+    
+    if (localStream) {
+        localStream.getAudioTracks().forEach(track => {
+            track.enabled = micEnabled;
+        });
+    }
+    showToast(micEnabled ? 'Microphone on' : 'Microphone off');
 }
 
-async function toggleCam() {
-    if (!room) return;
-
+function toggleCam() {
     camEnabled = !camEnabled;
-    const btn = document.getElementById('btn-cam');
-    btn.textContent = camEnabled ? '📷' : '📵';
-    btn.classList.toggle('disabled', !camEnabled);
-
-    await room.localParticipant.setCameraEnabled(camEnabled);
+    document.getElementById('btn-cam').textContent = camEnabled ? '📷' : '📹';
+    
+    if (localStream) {
+        localStream.getVideoTracks().forEach(track => {
+            track.enabled = camEnabled;
+        });
+    }
+    showToast(camEnabled ? 'Camera on' : 'Camera off');
 }
 
-// ================== WebSocket ==================
+// ================== Game Logic ==================
 
 function connect() {
-    ws = new WebSocket(`${WS_PROTOCOL}//${HOST}/ws`);
-    console.log('🔌 Connecting to:', `${WS_PROTOCOL}//${HOST}/ws`);
-
+    const wsUrl = `${WS_PROTOCOL}//${HOST}/ws`;
+    console.log('🔌 Connecting to:', wsUrl);
+    
+    ws = new WebSocket(wsUrl);
+    
     ws.onopen = () => {
         console.log('🔌 Connected to server');
-
-        // If we have a room ID, join the room
-        if (ROOM_ID) {
-            ws.send(JSON.stringify({
-                type: 'join_room',
-                roomId: ROOM_ID,
-                name: PLAYER_NAME
-            }));
-        }
-
-        // Say hello to game server
-        ws.send(JSON.stringify({
-            type: 'hello',
-            name: PLAYER_NAME
-        }));
     };
-
+    
     ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        handleMessage(data);
+        try {
+            const data = JSON.parse(event.data);
+            handleMessage(data);
+        } catch (e) {
+            console.error('Parse error:', e);
+        }
     };
-
+    
     ws.onclose = () => {
-        console.log('🔌 Disconnected, reconnecting...');
-        setTimeout(connect, 1000);
+        console.log('🔌 Disconnected from server');
+        showToast('Disconnected from server');
     };
-
+    
     ws.onerror = (err) => {
         console.error('WebSocket error:', err);
     };
 }
 
-// Handle incoming messages
 function handleMessage(data) {
-    console.log('📨 Received:', data.type, data);
+    // Log received messages (except state updates which are frequent)
+    if (data.type !== 'state') {
+        console.log('📨 Received:', data.type, data);
+    }
+    
     switch (data.type) {
         case 'welcome':
-            myId = data.id;  // Server sends "id" not "yourId"
-            document.getElementById('player-id').textContent = myId;
-            document.getElementById('share-link').value = window.location.href;
+            myId = data.id;
             console.log('✅ Got player ID from welcome:', myId);
-            // Connect to LiveKit after getting player ID
-            connectLiveKit();
+            document.getElementById('player-id').textContent = myId;
+            
+            // Join room
+            ws.send(JSON.stringify({
+                type: 'join_room',
+                roomId: ROOM_ID,
+                name: PLAYER_NAME
+            }));
             break;
-
+            
         case 'room_joined':
-            document.getElementById('room-id').textContent = data.roomId;
-            showToast(`Joined room ${data.roomId}`);
-            if (data.isHost) {
-                showToast('You are the host! Share the link to invite friends.');
-            }
             console.log('✅ Joined room:', data.roomId, 'myId:', myId);
-            // Also try to connect to LiveKit
-            connectLiveKit();
+            document.getElementById('room-id').textContent = data.roomId;
+            document.getElementById('player-count').textContent = data.playerCount;
+            
+            // Connect WebRTC after joining room
+            connectWebRTC();
             break;
-
+            
         case 'player_joined':
-            showToast(`${data.playerName} joined (${data.playerCount} players)`);
+            showNotification(`👋 ${data.playerName} joined (${data.playerCount} players)`);
+            document.getElementById('player-count').textContent = data.playerCount;
             break;
-
+            
         case 'player_left':
-            showToast(`${data.playerName} left`);
-            removeVideoTrack(data.playerId);
+            showNotification(`👋 ${data.playerName} left`);
+            document.getElementById('player-count').textContent = data.playerCount || '?';
             break;
-
+            
         case 'state':
-            // Set player ID from state if we don't have it yet
-            if (!myId && data.yourId) {
-                myId = data.yourId;
-                document.getElementById('player-id').textContent = myId;
-                console.log('✅ Got player ID from state:', myId);
-                connectLiveKit();
-            }
-            // Update players from game server
-            data.players.forEach(p => {
-                if (p.id === myId) {
-                    myPlayer.x = p.x;
-                    myPlayer.y = p.y;
-                    myPlayer.vx = p.vx;
-                    myPlayer.vy = p.vy;
-                } else {
-                    // Smooth interpolation for other players
-                    if (!players[p.id]) {
-                        players[p.id] = { x: p.x, y: p.y, vx: 0, vy: 0 };
+            // Update player positions
+            if (data.players) {
+                data.players.forEach(p => {
+                    players[p.id] = p;
+                    if (p.id === myId) {
+                        myPlayer.x = p.x;
+                        myPlayer.y = p.y;
                     }
-                    players[p.id].targetX = p.x;
-                    players[p.id].targetY = p.y;
-                    players[p.id].vx = p.vx;
-                    players[p.id].vy = p.vy;
-                }
-            });
+                });
+            }
             break;
-
+            
+        case 'webrtc_answer':
+            handleWebRTCAnswer(data);
+            break;
+            
+        case 'webrtc_ice':
+            handleWebRTCIce(data);
+            break;
+            
+        case 'webrtc_offer':
+            // For now, we're the initiator (caller)
+            // In a full mesh, we'd handle incoming offers too
+            break;
+            
         case 'error':
             showToast('Error: ' + data.error);
             break;
     }
 }
 
-// Input handling
+// ================== Game Loop ==================
+
+function gameLoop() {
+    // Clear
+    ctx.fillStyle = '#0a0a0f';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw grid
+    ctx.strokeStyle = '#1a1a2e';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < canvas.width; x += 50) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+    }
+    for (let y = 0; y < canvas.height; y += 50) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+    }
+    
+    // Draw players
+    Object.values(players).forEach(p => {
+        const isMe = p.id === myId;
+        
+        // Draw glow
+        const gradient = ctx.createRadialGradient(p.x, p.y, 10, p.x, p.y, 30);
+        gradient.addColorStop(0, isMe ? 'rgba(0, 212, 255, 0.5)' : 'rgba(124, 58, 237, 0.3)');
+        gradient.addColorStop(1, 'transparent');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 30, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Draw player
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 15, 0, Math.PI * 2);
+        ctx.fillStyle = isMe ? '#00d4ff' : '#7c3aed';
+        ctx.fill();
+        ctx.strokeStyle = isMe ? '#00ffff' : '#9b59b6';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Draw name
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(isMe ? 'You' : p.id.slice(0, 4), p.x, p.y - 25);
+    });
+    
+    requestAnimationFrame(gameLoop);
+}
+
+// ================== Input ==================
+
 document.addEventListener('keydown', (e) => {
-    switch (e.code) {
-        case 'KeyW': case 'ArrowUp': keys.up = true; break;
-        case 'KeyS': case 'ArrowDown': keys.down = true; break;
-        case 'KeyA': case 'ArrowLeft': keys.left = true; break;
-        case 'KeyD': case 'ArrowRight': keys.right = true; break;
+    switch (e.key) {
+        case 'w': case 'W': case 'ArrowUp': keys.up = true; break;
+        case 's': case 'S': case 'ArrowDown': keys.down = true; break;
+        case 'a': case 'A': case 'ArrowLeft': keys.left = true; break;
+        case 'd': case 'D': case 'ArrowRight': keys.right = true; break;
     }
 });
 
 document.addEventListener('keyup', (e) => {
-    switch (e.code) {
-        case 'KeyW': case 'ArrowUp': keys.up = false; break;
-        case 'KeyS': case 'ArrowDown': keys.down = false; break;
-        case 'KeyA': case 'ArrowLeft': keys.left = false; break;
-        case 'KeyD': case 'ArrowRight': keys.right = false; break;
+    switch (e.key) {
+        case 'w': case 'W': case 'ArrowUp': keys.up = false; break;
+        case 's': case 'S': case 'ArrowDown': keys.down = false; break;
+        case 'a': case 'A': case 'ArrowLeft': keys.left = false; break;
+        case 'd': case 'D': case 'ArrowRight': keys.right = false; break;
     }
-});
-
-// Mobile controls (if present)
-document.querySelectorAll('.dpad-btn').forEach(btn => {
-    const dir = btn.dataset.dir;
-
-    btn.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        if (dir === 'up') keys.up = true;
-        if (dir === 'down') keys.down = true;
-        if (dir === 'left') keys.left = true;
-        if (dir === 'right') keys.right = true;
-    });
-
-    btn.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        if (dir === 'up') keys.up = false;
-        if (dir === 'down') keys.down = false;
-        if (dir === 'left') keys.left = false;
-        if (dir === 'right') keys.right = false;
-    });
 });
 
 // Send input to server
-function sendInput() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    let dx = 0, dy = 0;
-    if (keys.up) dy = -1;
-    if (keys.down) dy = 1;
-    if (keys.left) dx = -1;
-    if (keys.right) dx = 1;
-
-    // Normalize diagonal movement
-    if (dx !== 0 && dy !== 0) {
-        dx *= 0.707;
-        dy *= 0.707;
-    }
-
-    ws.send(JSON.stringify({ type: 'input', dx, dy }));
-}
-
-// Game loop
-let lastTime = 0;
-const TICK_RATE = 60;
-const INPUT_RATE = 20;
-
-function gameLoop(timestamp) {
-    const dt = timestamp - lastTime;
-    lastTime = timestamp;
-
-    // Send input at fixed rate
-    if (Math.floor(timestamp / (1000 / INPUT_RATE)) !== Math.floor((timestamp - dt) / (1000 / INPUT_RATE))) {
-        sendInput();
-    }
-
-    // Interpolate other players
-    for (const id in players) {
-        const p = players[id];
-        if (p.targetX !== undefined) {
-            p.x += (p.targetX - p.x) * 0.2;
-            p.y += (p.targetY - p.y) * 0.2;
+setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN && myId) {
+        const dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+        const dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
+        
+        if (dx !== 0 || dy !== 0) {
+            ws.send(JSON.stringify({
+                type: 'input',
+                dx: dx,
+                dy: dy
+            }));
         }
     }
+}, 1000 / 60); // 60 Hz
 
-    // Render
-    render();
+// ================== UI ==================
 
-    requestAnimationFrame(gameLoop);
-}
-
-// Render
-function render() {
-    ctx.fillStyle = '#12121a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Center camera on player
-    const camX = myPlayer.x - canvas.width / 2;
-    const camY = myPlayer.y - canvas.height / 2;
-
-    ctx.save();
-    ctx.translate(-camX, -camY);
-
-    // Draw grid
-    ctx.strokeStyle = '#1a1a28';
-    ctx.lineWidth = 1;
-    const gridSize = 50;
-    for (let x = 0; x <= 1000; x += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, 1000);
-        ctx.stroke();
-    }
-    for (let y = 0; y <= 1000; y += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(1000, y);
-        ctx.stroke();
-    }
-
-    // Draw world bounds
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(0, 0, 1000, 1000);
-
-    // Draw other players
-    for (const id in players) {
-        const p = players[id];
-        drawPlayer(p.x, p.y, '#00d4ff', false);
-    }
-
-    // Draw self
-    drawPlayer(myPlayer.x, myPlayer.y, '#00ff88', true);
-
-    ctx.restore();
-}
-
-function drawPlayer(x, y, color, isSelf) {
-    // Glow
-    const gradient = ctx.createRadialGradient(x, y, 0, x, y, 30);
-    gradient.addColorStop(0, color + '40');
-    gradient.addColorStop(1, 'transparent');
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(x, y, 30, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Player dot
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, isSelf ? 12 : 10, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Border
-    ctx.strokeStyle = isSelf ? '#fff' : color;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-}
-
-// Toast notifications
 function showToast(message) {
-    let toast = document.getElementById('toast');
-    if (!toast) {
-        toast = document.createElement('div');
-        toast.id = 'toast';
-        document.body.appendChild(toast);
-    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
     toast.textContent = message;
-    toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 3000);
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2000);
 }
 
-// Copy link to clipboard
+function showNotification(message) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('GameServer', { body: message });
+    }
+}
+
+// Copy share link
+document.getElementById('share-link').value = window.location.href;
 function copyLink() {
-    const input = document.getElementById('share-link');
-    input.select();
-    document.execCommand('copy');
+    navigator.clipboard.writeText(window.location.href);
     showToast('Link copied!');
 }
 
+// Make functions global
+window.toggleMic = toggleMic;
+window.toggleCam = toggleCam;
+window.copyLink = copyLink;
+
 // Start
 connect();
-requestAnimationFrame(gameLoop);
+gameLoop();

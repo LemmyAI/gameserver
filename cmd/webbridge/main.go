@@ -1,6 +1,6 @@
 // WebBridge - WebSocket to UDP bridge with room support
 // Each room spawns a separate game server process (true isolation)
-// LiveKit integration for voice/video in each room
+// Native WebRTC via Pion for voice/video
 package main
 
 import (
@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -18,29 +17,15 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/google/uuid"
-	"github.com/livekit/protocol/auth"
 
 	"github.com/LemmyAI/gameserver/internal/protocol"
 	"github.com/LemmyAI/gameserver/internal/protocol/gamepb"
 	"github.com/LemmyAI/gameserver/internal/room"
+	"github.com/LemmyAI/gameserver/internal/webrtc"
 )
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-// LiveKit config from environment
-var (
-	livekitURL       = getEnv("LIVEKIT_URL", "ws://localhost:7880")
-	livekitAPIKey    = getEnv("LIVEKIT_API_KEY", "devkey")
-	livekitAPISecret = getEnv("LIVEKIT_API_SECRET", "secret123456789abcdefghij")
-)
-
-func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
 }
 
 type BrowserClient struct {
@@ -58,14 +43,15 @@ type GameRoom struct {
 	Process    *exec.Cmd
 	State      map[string]*gamepb.PlayerState
 	Mu         sync.RWMutex
+	WebRTC     *webrtc.Manager // WebRTC manager for this room
 }
 
 type Bridge struct {
-	clients   map[*websocket.Conn]*BrowserClient
-	gameRooms map[string]*GameRoom // roomID -> game room
-	mu        sync.RWMutex
-	rooms     *room.Registry
-	basePort  int
+	clients      map[*websocket.Conn]*BrowserClient
+	gameRooms    map[string]*GameRoom // roomID -> game room
+	mu           sync.RWMutex
+	rooms        *room.Registry
+	basePort     int
 }
 
 func NewBridge() *Bridge {
@@ -138,11 +124,15 @@ func (b *Bridge) spawnGameServer(roomID string) (*GameRoom, error) {
 		UDPAddr: addr,
 		Process: cmd,
 		State:   make(map[string]*gamepb.PlayerState),
+		WebRTC:  webrtc.NewManager(roomID),
 	}
 	b.gameRooms[roomID] = gr
 
 	// Start receiving for this room
 	go b.receiveUDP(gr)
+	
+	// Start WebRTC track handler
+	go b.handleWebRTCTracks(gr)
 
 	log.Printf("🚀 Spawned game server for room %s on UDP :%d", roomID, port)
 	return gr, nil
@@ -386,191 +376,6 @@ func (b *Bridge) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 }
 
-// ================== LiveKit ==================
-
-// LiveKitTokenResponse is returned when requesting a token
-type LiveKitTokenResponse struct {
-	Token    string `json:"token"`
-	RoomID   string `json:"roomId"`
-	PlayerID string `json:"playerId"`
-	URL      string `json:"url"`
-}
-
-// generateLiveKitToken creates a JWT token for a player to join a LiveKit room
-func generateLiveKitToken(roomID, playerID, playerName string) (string, error) {
-	at := auth.NewAccessToken(livekitAPIKey, livekitAPISecret)
-	grant := &auth.VideoGrant{
-		RoomJoin:       true,
-		Room:           roomID,
-		CanPublish:     boolPtr(true),
-		CanSubscribe:   boolPtr(true),
-		CanPublishData: boolPtr(true),
-	}
-	at.AddGrant(grant).
-		SetIdentity(playerID).
-		SetName(playerName).
-		SetValidFor(24 * time.Hour) // Token valid for 24 hours
-
-	return at.ToJWT()
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-func (b *Bridge) handleLiveKitToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		RoomID     string `json:"roomId"`
-		PlayerID   string `json:"playerId"`
-		PlayerName string `json:"playerName"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "invalid request"})
-		return
-	}
-
-	log.Printf("🎥 LiveKit token request: room=%s player=%s", req.RoomID, req.PlayerID)
-
-	// Verify room exists
-	rm := b.rooms.Get(req.RoomID)
-	if rm == nil {
-		log.Printf("🎥 Room not found: %s", req.RoomID)
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "room not found"})
-		return
-	}
-
-	// Generate token
-	token, err := generateLiveKitToken(req.RoomID, req.PlayerID, req.PlayerName)
-	if err != nil {
-		log.Printf("Failed to generate LiveKit token: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "failed to generate token"})
-		return
-	}
-
-	// Return proxy URL instead of direct LiveKit URL
-	scheme := "ws"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "wss"
-	}
-	proxyURL := fmt.Sprintf("%s://%s/livekit/ws", scheme, r.Host)
-
-	log.Printf("🎥 Returning LiveKit URL: %s", proxyURL)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(LiveKitTokenResponse{
-		Token:    token,
-		RoomID:   req.RoomID,
-		PlayerID: req.PlayerID,
-		URL:      proxyURL,
-	})
-}
-
-func (b *Bridge) handleLiveKitConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	// Return the proxy URL instead of direct LiveKit URL
-	// Browser will connect to /livekit/ws which we proxy to LiveKit
-	scheme := "ws"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "wss"
-	}
-	proxyURL := fmt.Sprintf("%s://%s/livekit/ws", scheme, r.Host)
-	json.NewEncoder(w).Encode(map[string]string{
-		"url": proxyURL,
-	})
-}
-
-// handleLiveKitWS proxies WebSocket connections to LiveKit server
-func (b *Bridge) handleLiveKitWS(w http.ResponseWriter, r *http.Request) {
-	// Parse the LiveKit URL
-	targetURL, err := url.Parse(livekitURL)
-	if err != nil {
-		log.Printf("Failed to parse LiveKit URL: %v", err)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-		return
-	}
-
-	// Create connection to LiveKit
-	targetAddr := targetURL.Host
-	if targetURL.Scheme == "wss" {
-		targetAddr = targetURL.Host
-	}
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	// Build target URL with query params
-	targetWSURL := fmt.Sprintf("ws://%s%s", targetAddr, r.URL.Path)
-	if r.URL.RawQuery != "" {
-		targetWSURL += "?" + r.URL.RawQuery
-	}
-
-	log.Printf("🔀 Proxying LiveKit WS: %s -> %s", r.URL.String(), targetWSURL)
-
-	// Connect to LiveKit
-	targetConn, _, err := dialer.Dial(targetWSURL, nil)
-	if err != nil {
-		log.Printf("Failed to connect to LiveKit: %v", err)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-		return
-	}
-	defer targetConn.Close()
-
-	// Upgrade client connection
-	clientConn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Failed to upgrade client WS: %v", err)
-		return
-	}
-	defer clientConn.Close()
-
-	// Bidirectional copy
-	done := make(chan struct{}, 2)
-
-	// Client -> LiveKit
-	go func() {
-		defer func() { done <- struct{}{} }()
-		for {
-			msgType, msg, err := clientConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if err := targetConn.WriteMessage(msgType, msg); err != nil {
-				return
-			}
-		}
-	}()
-
-	// LiveKit -> Client
-	go func() {
-		defer func() { done <- struct{}{} }()
-		for {
-			msgType, msg, err := targetConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if err := clientConn.WriteMessage(msgType, msg); err != nil {
-				return
-			}
-		}
-	}()
-
-	// Wait for either direction to finish
-	<-done
-}
-
 // ================== WebSocket ==================
 
 func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -697,6 +502,74 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				client.roomID = ""
 			}
+
+		// WebRTC Signaling
+		case "webrtc_offer":
+			if client.roomID == "" {
+				continue
+			}
+			b.mu.RLock()
+			gr, exists := b.gameRooms[client.roomID]
+			b.mu.RUnlock()
+
+			if !exists {
+				continue
+			}
+
+			sdp, _ := data["sdp"].(string)
+			answer, err := gr.WebRTC.HandleOffer(client.playerID, sdp)
+			if err != nil {
+				log.Printf("❌ WebRTC offer error: %v", err)
+				conn.WriteJSON(map[string]interface{}{
+					"type":  "webrtc_error",
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			// Send answer back to client
+			conn.WriteJSON(map[string]interface{}{
+				"type":     "webrtc_answer",
+				"roomId":   client.roomID,
+				"playerId": client.playerID,
+				"sdp":      answer.SDP,
+			})
+
+			// ICE candidates are sent via OnICECandidate callback (handled separately)
+
+		case "webrtc_answer":
+			if client.roomID == "" {
+				continue
+			}
+			b.mu.RLock()
+			gr, exists := b.gameRooms[client.roomID]
+			b.mu.RUnlock()
+
+			if !exists {
+				continue
+			}
+
+			sdp, _ := data["sdp"].(string)
+			if err := gr.WebRTC.HandleAnswer(client.playerID, sdp); err != nil {
+				log.Printf("❌ WebRTC answer error: %v", err)
+			}
+
+		case "webrtc_ice":
+			if client.roomID == "" {
+				continue
+			}
+			b.mu.RLock()
+			gr, exists := b.gameRooms[client.roomID]
+			b.mu.RUnlock()
+
+			if !exists {
+				continue
+			}
+
+			candidate, _ := data["candidate"].(json.RawMessage)
+			if err := gr.WebRTC.HandleICECandidate(client.playerID, candidate); err != nil {
+				log.Printf("❌ WebRTC ICE error: %v", err)
+			}
 		}
 	}
 
@@ -731,6 +604,14 @@ func (b *Bridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"browser_clients":%d,"game_rooms":%d,"rooms":%d}`, clientCount, roomCount, b.rooms.Count())
 }
 
+// handleWebRTCTracks handles incoming WebRTC tracks and broadcasts them to other players
+func (b *Bridge) handleWebRTCTracks(gr *GameRoom) {
+	for event := range gr.WebRTC.GetTrackEvents() {
+		log.Printf("🎥 Broadcasting track from %s to room %s", event.PlayerID, gr.ID)
+		// For now, just log - full implementation would forward tracks
+	}
+}
+
 func (b *Bridge) handleLanding(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(landingPageHTML))
@@ -750,9 +631,6 @@ func main() {
 	http.HandleFunc("/rooms/", bridge.handleRoomRoutes)
 	http.HandleFunc("/ws", bridge.handleWS)
 	http.HandleFunc("/status", bridge.handleStatus)
-	http.HandleFunc("/livekit/token", bridge.handleLiveKitToken)
-	http.HandleFunc("/livekit/config", bridge.handleLiveKitConfig)
-	http.HandleFunc("/livekit/ws", bridge.handleLiveKitWS) // WebSocket proxy to LiveKit
 	http.HandleFunc("/", bridge.handleLanding)
 	http.HandleFunc("/room/", bridge.handleRoomPage)
 
@@ -776,7 +654,7 @@ func main() {
 		// HTTP only (Render handles HTTPS termination, or local dev without certs)
 		log.Printf("🌐 Web Bridge: http://localhost:%s", port)
 		log.Println("📡 Game servers will be spawned per-room starting at port 9100")
-		log.Printf("🎥 LiveKit URL: %s\n", livekitURL)
+		log.Println("🎥 WebRTC enabled (native Pion)")
 		log.Fatal(http.ListenAndServe(":"+port, nil))
 	} else {
 		// HTTPS available (local dev with mkcert)
@@ -784,7 +662,7 @@ func main() {
 		log.Println("🌐 Web Bridge: https://localhost:8443")
 		log.Println("🌐 Also: https://192.168.0.39:8443")
 		log.Println("📡 Game servers will be spawned per-room starting at port 9100")
-		log.Printf("🎥 LiveKit URL: %s\n", livekitURL)
+		log.Println("🎥 WebRTC enabled (native Pion)")
 		log.Fatal(http.ListenAndServeTLS(":8443", certFile, keyFile, nil))
 	}
 }
@@ -870,7 +748,6 @@ var roomPageHTML = `<!DOCTYPE html>
     <meta charset="utf-8">
     <title>Room</title>
     <link rel="stylesheet" href="/static/style.css">
-    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.js"></script>
 </head>
 <body>
     <div id="app">
