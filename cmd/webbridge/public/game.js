@@ -118,8 +118,21 @@ async function connectWebRTC() {
             addSelfToGrid(localStream);
 
         } catch (mediaErr) {
-            console.warn('Media access denied or not available:', mediaErr.message);
-            showToast('Camera/mic not available');
+            console.warn('Media access denied:', mediaErr);
+            
+            // More helpful error messages
+            let msg = 'Camera/mic unavailable';
+            if (mediaErr.name === 'NotAllowedError') {
+                msg = 'Permission denied - click the 🔒 icon in the URL bar to allow camera/mic';
+            } else if (mediaErr.name === 'NotFoundError') {
+                msg = 'No camera/mic found on this device';
+            } else if (mediaErr.name === 'NotReadableError') {
+                msg = 'Camera/mic is in use by another app';
+            }
+            showToast(msg);
+            
+            // Still connect for audio-only or just game
+            addSelfToGrid(null); // Show placeholder
         }
 
         // Create offer
@@ -152,20 +165,26 @@ function addSelfToGrid(stream) {
     div.className = 'video-tile self';
     div.id = `video-${myId}`;
 
-    const video = document.createElement('video');
-    video.autoplay = true;
-    video.muted = true; // Mute self to prevent feedback
-    video.playsInline = true;
-    
     if (stream) {
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.muted = true; // Mute self to prevent feedback
+        video.playsInline = true;
         video.srcObject = stream;
+        div.appendChild(video);
+    } else {
+        // Placeholder when no camera
+        const placeholder = document.createElement('div');
+        placeholder.className = 'video-placeholder';
+        placeholder.innerHTML = '🎥❌<br><small>No camera</small>';
+        placeholder.style.cssText = 'display:flex;align-items:center;justify-content:center;flex-direction:column;color:#888;font-size:24px;height:100%;';
+        div.appendChild(placeholder);
     }
 
     const label = document.createElement('span');
     label.className = 'video-label';
     label.textContent = 'You';
 
-    div.appendChild(video);
     div.appendChild(label);
     grid.appendChild(div);
 }
