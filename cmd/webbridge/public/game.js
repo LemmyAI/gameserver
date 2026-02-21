@@ -92,10 +92,19 @@ async function connectWebRTC() {
 
         // Handle incoming tracks
         peerConnection.ontrack = (event) => {
-            console.log('📺 Received track:', event.track.kind);
+            console.log('📺 Received track:', event.track.kind, 'id:', event.track.id, 'enabled:', event.track.enabled, 'muted:', event.track.muted);
+            console.log('📺 Streams:', event.streams.length, event.streams.map(s => s.id));
+            
             const stream = event.streams[0];
             if (stream) {
+                // Log when track gets data
+                event.track.onunmute = () => console.log('📺 Track unmuted:', event.track.kind);
+                event.track.onmute = () => console.log('📺 Track muted:', event.track.kind);
+                event.track.onended = () => console.log('📺 Track ended:', event.track.kind);
+                
                 addRemoteStream(stream);
+            } else {
+                console.warn('📺 No stream in track event!');
             }
         };
 
