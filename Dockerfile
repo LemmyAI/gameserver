@@ -29,18 +29,16 @@ RUN apk add --no-cache ca-certificates
 COPY --from=builder /server /app/bin/server
 COPY --from=builder /webbridge /app/bin/webbridge
 
-# Copy static files
+# Copy static files (webbridge needs these)
 COPY cmd/webbridge/public /app/cmd/webbridge/public
 
-# Copy livekit config (for self-hosted option)
-COPY livekit.yaml /app/livekit.yaml
+# Render sets PORT env var - webbridge listens on this
+# HTTPS is handled by Render's load balancer
+EXPOSE 8080
 
-# Expose ports
-# 8080 - HTTP/WS (Render maps this to 443)
-# 8443 - HTTPS (if using own cert)
-# 7880 - LiveKit (if self-hosted)
-# 9100-9200 - Game servers (UDP)
-EXPOSE 8080 8443 7880
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://localhost:8080/status || exit 1
 
 # Start webbridge (it spawns game servers as needed)
 CMD ["/app/bin/webbridge"]
