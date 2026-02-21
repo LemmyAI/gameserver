@@ -146,25 +146,27 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 	
 	// Add track to all OTHER players and prepare renegotiation
 	var toRenegotiate []string
-	for playerID := range m.peerConns {
+	for playerID, pc := range m.peerConns {
 		if playerID != fromPlayerID {
-			if _, err := m.peerConns[playerID].AddTrack(localTrack); err != nil {
-				log.Printf("❌ Failed to add track to %s: %v", playerID, err)
+			if _, err := pc.AddTrack(localTrack); err != nil {
+				log.Printf("❌ [FORWARD] Failed to add track to %s: %v", playerID, err)
 			} else {
-				log.Printf("✅ Added %s track from %s to %s", track.Kind(), fromPlayerID, playerID)
+				log.Printf("✅ [FORWARD] Added %s track from %s to %s", track.Kind(), fromPlayerID, playerID)
 				toRenegotiate = append(toRenegotiate, playerID)
 			}
 		}
 	}
 	m.mu.Unlock()
 
-	log.Printf("📷 [%s] Created %s track, renegotiate needed for: %v", fromPlayerID, track.Kind(), toRenegotiate)
+	log.Printf("📷 [%s] Created %s track, need to renegotiate with: %v", fromPlayerID, track.Kind(), toRenegotiate)
 
 	// Queue renegotiation events
 	for _, playerID := range toRenegotiate {
 		select {
 		case m.renegotiateChan <- RenegotiateEvent{PlayerID: playerID, Track: localTrack, Kind: track.Kind()}:
+			log.Printf("🔄 [FORWARD] Queued renegotiation event for %s", playerID)
 		default:
+			log.Printf("⚠️ [FORWARD] Renegotiate channel full, dropping event for %s", playerID)
 		}
 	}
 
@@ -185,7 +187,7 @@ func (m *Manager) forwardTrackToOthers(fromPlayerID string, track *webrtc.TrackR
 		
 		packets++
 		if packets == 1 {
-			log.Printf("📤 [%s] First %s packet!", fromPlayerID, track.Kind())
+			log.Printf("📤 [%s] First %s RTP packet forwarded!", fromPlayerID, track.Kind())
 		}
 	}
 }
@@ -321,6 +323,16 @@ func (m *Manager) HandleICECandidate(playerID string, candidate json.RawMessage)
 // GetTrackEvents returns the channel for track events
 func (m *Manager) GetTrackEvents() <-chan TrackEvent {
 	return m.trackChan
+}
+
+// GetSenders returns the number of senders for a player
+func (m *Manager) GetSenders(playerID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if pc, exists := m.peerConns[playerID]; exists {
+		return len(pc.GetSenders())
+	}
+	return 0
 }
 
 // Close closes all peer connections

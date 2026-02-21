@@ -534,8 +534,8 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 				"playerId": client.playerID,
 				"sdp":      answer.SDP,
 			})
-
-			// ICE candidates are sent via OnICECandidate callback (handled separately)
+			
+			log.Printf("✅ [%s] Sent WebRTC answer, senders: %d", client.playerID, gr.WebRTC.GetSenders(client.playerID))
 
 		case "webrtc_answer":
 			if client.roomID == "" {
@@ -606,45 +606,60 @@ func (b *Bridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleWebRTCTracks handles incoming WebRTC tracks and renegotiation
 func (b *Bridge) handleWebRTCTracks(gr *GameRoom) {
+	log.Printf("🎥 [DEBUG] Starting WebRTC track handler for room %s", gr.ID)
 	for {
 		select {
 		case event := <-gr.WebRTC.GetTrackEvents():
-			log.Printf("🎥 Track event from %s in room %s", event.PlayerID, gr.ID)
+			log.Printf("🎥 [TRACK EVENT] from %s in room %s, kind: %v", event.PlayerID, gr.ID, event.Track.Kind())
 			
 		case renegotiate := <-gr.WebRTC.GetRenegotiateChan():
-			log.Printf("🔄 Renegotiation needed for %s (%s)", renegotiate.PlayerID, renegotiate.Kind)
+			log.Printf("🔄 [RENEGOTIATE] Starting for player %s, kind: %v", renegotiate.PlayerID, renegotiate.Kind)
 			
 			// Create new offer for this player
 			offer, err := gr.WebRTC.CreateOffer(renegotiate.PlayerID)
 			if err != nil {
-				log.Printf("❌ Failed to create renegotiation offer: %v", err)
+				log.Printf("❌ [RENEGOTIATE] Failed to create offer: %v", err)
 				continue
 			}
+			if offer == nil {
+				log.Printf("❌ [RENEGOTIATE] Offer is nil for %s", renegotiate.PlayerID)
+				continue
+			}
+			
+			log.Printf("🔄 [RENEGOTIATE] Created offer, SDP length: %d", len(offer.SDP))
 			
 			// Find the WebSocket connection for this player
 			b.mu.RLock()
 			var targetConn *websocket.Conn
+			var foundClient *BrowserClient
 			for ws, client := range b.clients {
 				if client.playerID == renegotiate.PlayerID && client.roomID == gr.ID {
 					targetConn = ws
+					foundClient = client
 					break
 				}
 			}
 			b.mu.RUnlock()
 			
 			if targetConn == nil {
-				log.Printf("⚠️ No connection found for player %s", renegotiate.PlayerID)
+				log.Printf("⚠️ [RENEGOTIATE] No connection found for player %s", renegotiate.PlayerID)
 				continue
 			}
 			
+			log.Printf("🔄 [RENEGOTIATE] Found connection for %s (name: %s)", renegotiate.PlayerID, foundClient.name)
+			
 			// Send offer to client
-			targetConn.WriteJSON(map[string]interface{}{
+			err = targetConn.WriteJSON(map[string]interface{}{
 				"type":     "webrtc_offer",
 				"roomId":   gr.ID,
 				"playerId": renegotiate.PlayerID,
 				"sdp":      offer.SDP,
 			})
-			log.Printf("📤 Sent renegotiation offer to %s", renegotiate.PlayerID)
+			if err != nil {
+				log.Printf("❌ [RENEGOTIATE] Failed to send offer: %v", err)
+			} else {
+				log.Printf("📤 [RENEGOTIATE] Sent offer to %s", renegotiate.PlayerID)
+			}
 		}
 	}
 }
