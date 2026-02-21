@@ -284,7 +284,6 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 	}
 	
 	// Set remote description - this triggers OnTrack callbacks
-	// But the playerID is now in peerConns, so forwardTrackToOthers will skip them
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		return nil, err
 	}
@@ -331,6 +330,18 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		}
 	}
 	m.mu.RUnlock()
+	
+	// CRITICAL: Stop any transceivers that don't have tracks to send
+	// This prevents the server from sending empty/black video
+	for _, t := range pc.GetTransceivers() {
+		if t.Direction() == webrtc.RTPTransceiverDirectionSendrecv {
+			// Check if this transceiver has a track
+			if t.Sender() == nil || t.Sender().Track() == nil {
+				log.Printf("🛑 [%s] Stopping sendrecv transceiver with no track (kind: %v)", playerID, t.Receiver().Track().Kind())
+				_ = t.Stop()
+			}
+		}
+	}
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
@@ -341,7 +352,7 @@ func (m *Manager) HandleOffer(playerID string, sdp string) (*webrtc.SessionDescr
 		return nil, err
 	}
 
-	log.Printf("✅ [%s] Answer created, senders: %d", playerID, len(pc.GetSenders()))
+	log.Printf("✅ [%s] Answer created, senders: %d, transceivers: %d", playerID, len(pc.GetSenders()), len(pc.GetTransceivers()))
 	return &answer, nil
 }
 
