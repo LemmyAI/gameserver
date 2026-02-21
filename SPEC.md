@@ -4,7 +4,7 @@
 
 GameServer is a multiplayer game backend with a **hybrid networking approach**:
 - **Game state over UDP/QUIC** - Low latency, purpose-built for games
-- **Voice/video over LiveKit** - Battle-tested WebRTC infrastructure
+- **Voice/video via Pion WebRTC** - Native WebRTC in Go, no external service
 - **HTTP for auth/matchmaking** - Simple, reliable
 
 This architecture uses each transport for what it does best.
@@ -27,7 +27,7 @@ This architecture uses each transport for what it does best.
 ┌────────────────────────────▼────────────────────────────────┐
 │                    Game Server                               │
 │   ┌─────────────────┐    ┌─────────────────┐                │
-│   │  UDP/QUIC       │    │  LiveKit        │                │
+│   │  UDP/QUIC       │    │  Pion WebRTC    │                │
 │   │  Game State     │    │  Voice/Video    │                │
 │   │  (Authoritative)│    │  (Relay)        │                │
 │   └────────┬────────┘    └────────┬────────┘                │
@@ -47,7 +47,7 @@ Client Connection:
 ┌─────────────┐         ┌─────────────┐
 │   Player    │◄─UDP───►│ Game Server │ (game state, ~16ms)
 │             │         │             │
-│             │◄─WebRTC─►│  LiveKit    │ (voice/video)
+│             │◄─WebRTC─►│ Pion WebRTC │ (voice/video)
 └─────────────┘         └─────────────┘
 ```
 
@@ -69,7 +69,7 @@ gameserver/
 │   │   ├── state.go        # State machine
 │   │   ├── prediction.go   # Client prediction support
 │   │   └── validation.go   # Input validation, anti-cheat
-│   ├── livekit/            # LiveKit integration (voice/video only)
+│   ├── webrtc/             # Native WebRTC via Pion (voice/video)
 │   │   ├── client.go       # SDK client
 │   │   └── tokens.go       # Token generation
 │   ├── matchmaker/
@@ -238,37 +238,29 @@ func (v *InputValidator) Validate(input PlayerInput, player *Player) error {
 }
 ```
 
-### 4. LiveKit Integration (Voice/Video Only)
+### 4. WebRTC Integration (Voice/Video via Pion)
+
+**Native WebRTC in Go - no external service needed!**
 
 ```go
-// internal/livekit/tokens.go
-package livekit
+// internal/webrtc/webrtc.go
+package webrtc
 
 import (
-    "github.com/livekit/protocol/auth"
+    "github.com/pion/webrtc/v4"
 )
 
-type TokenGenerator struct {
-    apiKey    string
-    apiSecret string
+type Manager struct {
+    rooms map[string]*Room
 }
 
-// Generate token for voice/video room
-func (t *TokenGenerator) GenerateVoiceToken(playerID, roomName string) (string, error) {
-    at := auth.NewAccessToken(t.apiKey, t.apiSecret)
-    
-    grant := &auth.VideoGrant{
-        RoomJoin: true,
-        Room:     roomName,
-        CanPublish: true,
-        CanSubscribe: true,
+func (m *Manager) CreatePeerConnection(roomID, playerID string) (*webrtc.PeerConnection, error) {
+    config := webrtc.Configuration{
+        ICEServers: []webrtc.ICEServer{
+            {URLs: []string{"stun:stun.l.google.com:19302"}},
+        },
     }
-    
-    at.AddGrant(grant).
-        SetIdentity(playerID).
-        SetValidFor(time.Hour)
-    
-    return at.ToJWT()
+    return webrtc.NewPeerConnection(config)
 }
 ```
 
@@ -302,9 +294,9 @@ func (m *Matchmaker) FindMatch(gameType string, playerID string, skill int) (*Ma
         // Assign game server
         server := m.assignServer()
         
-        // Create LiveKit room for voice
+        // Create WebRTC room for voice
         voiceRoom := "voice-" + matchID
-        m.livekit.CreateRoom(voiceRoom)
+        m.webrtc.CreateRoom(voiceRoom)
         
         return &Match{
             ID:         matchID,
@@ -395,13 +387,13 @@ message MatchEvent {
 | `POST /auth/login` | POST | Player authentication |
 | `POST /auth/register` | POST | New player registration |
 | `GET /auth/token` | GET | Get game server auth token |
-| `GET /auth/voice-token` | GET | Get LiveKit voice token |
+| `GET /auth/voice-token` | GET | Get WebRTC signaling info |
 | `POST /match/queue` | POST | Join matchmaking queue |
 | `GET /match/status` | GET | Check queue status |
 | `GET /stats/{player}` | GET | Player statistics |
 | `GET /leaderboard` | GET | Game leaderboard |
 
-## DataChannel Topics (for future LiveKit fallback)
+## DataChannel Topics (for future WebRTC fallback)
 
 | Topic | Mode | Purpose |
 |-------|------|---------|
@@ -414,7 +406,7 @@ message MatchEvent {
 |-----------|------------|
 | **Language** | Go 1.21+ |
 | **Transport** | UDP (primary), QUIC (optional) |
-| **Media** | LiveKit (voice/video only) |
+| **Media** | Pion WebRTC (voice/video only) |
 | **Database** | PostgreSQL 15+ |
 | **Cache** | Redis 7+ |
 | **Protocol** | Protocol Buffers |
@@ -434,10 +426,10 @@ transport:
   send_buffer: 1024
   recv_buffer: 1024
   
-livekit:
-  host: "https://your-livekit.cloud"
-  api_key: "${LIVEKIT_API_KEY}"
-  api_secret: "${LIVEKIT_API_SECRET}"
+webrtc:
+  stun_servers:
+    - "stun:stun.l.google.com:19302"
+    - "stun:stun1.l.google.com:19302"
   
 database:
   url: "${DATABASE_URL}"
@@ -677,7 +669,7 @@ func (r *ReconnectionManager) sendFullStateSync(playerID string) {
 - [ ] HTTP auth endpoints
 - [ ] Basic game state management
 - [ ] Input validation
-- [ ] LiveKit voice token generation
+- [ ] WebRTC signaling endpoint
 - [ ] Reliable UDP with ACK/retry
 
 ### v0.4
@@ -733,8 +725,7 @@ services:
     environment:
       - DATABASE_URL=postgres://...
       - REDIS_URL=redis://redis:6379
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - STUN_SERVERS=stun:stun.l.google.com:19302
     depends_on:
       - postgres
       - redis
@@ -750,11 +741,11 @@ services:
 
 | Aspect | v0.2 | v0.3 |
 |--------|------|------|
-| **Transport** | LiveKit-only | UDP primary, LiveKit for media |
+| **Transport** | External service | UDP primary, Pion WebRTC for media |
 | **Architecture** | Coupled to LiveKit | Pluggable transport interface |
 | **Game traffic** | DataChannels | Pure UDP |
-| **Voice/video** | DataChannels | LiveKit (proper use) |
-| **Flexibility** | Vendor locked | Can swap transports |
+| **Voice/video** | External service | Native Pion WebRTC |
+| **Flexibility** | Vendor locked | Self-contained |
 
 ## License
 
@@ -762,6 +753,6 @@ MIT License
 
 ## Version History
 
-- **v0.3** (2026): Hybrid architecture - UDP for game, LiveKit for media
+- **v0.3** (2026): Hybrid architecture - UDP for game, Pion WebRTC for media
 - **v0.2** (2026): LiveKit-only architecture (archived)
 - **v0.1** (Archived): Initial Rust/Node specs

@@ -106,7 +106,7 @@ Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
 
 ---
 
-## Phase 3: Game Rooms & LiveKit Voice/Video
+## Phase 3: Game Rooms & Native WebRTC Voice/Video
 
 ### Goal: Players can create a game room and share a link with friends. Everyone can see and hear each other while in the room (before and during game).
 
@@ -114,7 +114,7 @@ Browser (WebSocket) ↔ Webbridge (port 8081) ↔ Game Server (UDP 9000)
 ```
 Create Game → Get unique room ID → Share link: localhost:8081/room/{43-char-id}
                                           ↓
-                            Friends join same room → LiveKit video grid
+                            Friends join same room → Native WebRTC video grid
                             Everyone sees/hears each other immediately
 ```
 
@@ -130,9 +130,9 @@ Create Game → Get unique room ID → Share link: localhost:8081/room/{43-char-
 - [x] `GET /rooms/{id}` → room info (player count, status)
 - [x] `DELETE /rooms/{id}` → close room
 
-### Day 5-7: LiveKit Integration ✅ COMPLETE
-- [x] LiveKit server config (livekit.yaml)
-- [x] Generate LiveKit tokens per player join (`POST /livekit/token`)
+### Day 5-7: Native WebRTC via Pion ✅ COMPLETE
+- [x] Pion WebRTC integration (STUN servers configured in code (stun.l.google.com)
+- [x] Signaling via WebSocket (offer/answer/ICE) 
 - [x] Create room on first player join
 - [x] Video grid UI component in browser
 - [x] Mute/camera toggle controls
@@ -153,7 +153,7 @@ Create Game → Get unique room ID → Share link: localhost:8081/room/{43-char-
 ### Deliverable
 ```bash
 # Run full stack:
-./run.sh   # Starts LiveKit (Docker) + WebBridge
+./run.sh   # Starts WebBridge (native WebRTC included)
 
 # Player creates room:
 curl -X POST http://localhost:8081/rooms
@@ -164,18 +164,18 @@ curl -X POST http://localhost:8081/rooms
 # Game runs in same view → voice/video in corner panel
 ```
 
-### LiveKit Setup ✅ DONE
+### Native WebRTC Setup ✅ DONE
 ```bash
 # Self-hosted via Docker (automated in run.sh)
 docker run -d \
-  -v $PWD/livekit.yaml:/livekit.yaml \
+  -v $PWD/STUN servers configured in code (stun.l.google.com)
   -p 7880:7880 \
   -p 7881:7881 \
   -p 50000-50200:50000-50200/udp \
-  livekit/livekit-server:latest \
-  --config /livekit.yaml
+  ../bin/webbridge
+  --config /STUN servers configured in code (stun.l.google.com)
 
-# API keys configured in livekit.yaml + environment variables
+# API keys configured in STUN servers configured in code (stun.l.google.com)
 ```
 
 ---
@@ -210,7 +210,7 @@ docker run -d \
 | Phase 1 | ✅ UDP echo working |
 | Phase 2 | ✅ Multiplayer state sync at 60Hz |
 | Phase 2.5 | ✅ Browser canvas client with real-time multiplayer |
-| Phase 3 | ✅ Game rooms + LiveKit voice/video (UI polish remaining) |
+| Phase 3 | ✅ Game rooms + Native WebRTC voice/video (UI polish remaining) |
 | Phase 4 | ⏳ Polish & production deployment |
 
 ## Benchmarks
@@ -229,8 +229,7 @@ require (
     github.com/google/uuid v1.6.0  ✅ (room IDs, player IDs)
     google.golang.org/protobuf v1.36.0  ✅
     github.com/gorilla/websocket v1.5.3  ✅ (webbridge)
-    github.com/livekit/server-sdk-go/v2 v2.13.3  ✅ (LiveKit tokens)
-    github.com/livekit/protocol v1.44.0  ✅ (LiveKit protocol)
+    github.com/pion/webrtc/v4 ✅ (native WebRTC)
     
     // Future (not needed yet):
     // github.com/redis/go-redis/v9  (if room persistence needed)

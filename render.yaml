@@ -1,34 +1,12 @@
 services:
-  # LiveKit server for video/voice
+  # Webbridge - game server + WebSocket bridge with native WebRTC
   - type: web
-    name: gameserver-livekit
-    env: docker
+    name: gameserver-go
+    env: go
     plan: starter
-    dockerfilePath: ./docker/livekit/Dockerfile
-    dockerContext: .
-    envVars:
-      - key: LIVEKIT_API_SECRET
-        generateValue: true  # Auto-generate a secret
-      - key: LIVEKIT_API_KEY
-        value: devkey
-    healthCheckPath: /
-
-  # Webbridge - game server + WebSocket bridge
-  - type: web
-    name: gameserver-webbridge
-    env: docker
-    plan: starter
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    buildCommand: go build -o bin/webbridge ./cmd/webbridge && go build -o bin/server ./cmd/server
+    startCommand: ./bin/webbridge
     envVars:
       - key: PORT
         value: 8080
-      - key: LIVEKIT_URL
-        # Will be set to the livekit service URL after deployment
-        value: ws://gameserver-livekit.onrender.com:7880
-      - key: LIVEKIT_API_KEY
-        value: devkey
-      - key: LIVEKIT_API_SECRET
-        # Same secret as livekit service
-        sync: false
     healthCheckPath: /status
